@@ -1,0 +1,31 @@
+{
+  "name": "nodemon-babel",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/server/app.js",
+  "scripts": {
+    "build": "babel ./src/client --out-file ./hosted/bundle.js",
+    "watch": "babel --watch ./src/client --out-file ./hosted/bundle.js",
+    "nodemon": "nodemon --watch ./src ./src/server/app.js",
+    "start": "node ./src/server/app.js",
+    "pretest": "eslint ./src/server --fix",
+    "test": "echo \"Tests complete\""
+  },
+  "engines": {
+    "node": "8.4.0",
+    "npm": "5.3.0"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "babel-cli": "^6.26.0",
+    "babel-preset-env": "^1.6.0",
+    "eslint": "^4.8.0",
+    "eslint-config-airbnb": "^15.1.0",
+    "eslint-plugin-import": "^2.7.0",
+    "nodemon": "^1.12.1"
+  },
+  "dependencies": {
+    "socket.io": "^2.0.3"
+  }
+}
