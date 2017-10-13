@@ -24,3 +24,12 @@ console.log(`Listening on port ${port}`);
 
 const io = socketio(app);
 
+let playerId = 0;
+
+io.on('connection', (socket) => {
+  const id = playerId++;
+  socket.on('commandServer', (data) => {
+    data.id = id;
+    socket.broadcast.emit('commandClient', data);
+  });
+});
