@@ -26,11 +26,11 @@ console.log(`Listening on port ${port}`);
 const io = socketio(app);
 
 io.on('connection', (socket) => {
-  const initialSnapshot = { 
-    time: Date.now(), 
-    x: utilities.getRandomInt(0, 200), 
+  const initialSnapshot = {
+    time: Date.now(),
+    x: utilities.getRandomInt(0, 200),
     y: utilities.getRandomInt(0, 200),
-    color: utilities.getRandomBrightColor() 
+    color: utilities.getRandomBrightColor(),
   };
 
   socket.emit('initial', initialSnapshot);
