@@ -24,7 +24,6 @@ const app = http.createServer(onRequest).listen(port);
 console.log(`Listening on port ${port}`);
 
 const io = socketio(app);
-const SIMULATED_LATENCY = 0;
 
 io.on('connection', (socket) => {
   const initialSnapshot = { 
@@ -41,17 +40,13 @@ io.on('connection', (socket) => {
   socket.on('commandInfo', (data) => {
     const dataCopy = data;
     dataCopy.id = socket.id;
-    setTimeout(() => {
-      socket.broadcast.emit('commandInfo', dataCopy);
-    }, SIMULATED_LATENCY);
+    socket.broadcast.emit('commandInfo', dataCopy);
   });
 
   socket.on('snapshot', (data) => {
     const dataCopy = data;
     dataCopy.id = socket.id;
-    setTimeout(() => {      
-      socket.broadcast.emit('snapshot', dataCopy);
-    }, SIMULATED_LATENCY);
+    socket.broadcast.emit('snapshot', dataCopy);
   });
 
   socket.on('disconnect', () => {
