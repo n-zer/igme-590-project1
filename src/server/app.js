@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const socketio = require('socket.io');
+const utilities = require('./utilities.js');
 
 const port = process.env.PORT || process.env.NODE_PORT || 3000;
 
@@ -23,13 +24,37 @@ const app = http.createServer(onRequest).listen(port);
 console.log(`Listening on port ${port}`);
 
 const io = socketio(app);
-
-let playerId = 0;
+const SIMULATED_LATENCY = 0;
 
 io.on('connection', (socket) => {
-  const id = playerId++;
-  socket.on('commandServer', (data) => {
-    data.id = id;
-    socket.broadcast.emit('commandClient', data);
+  const initialSnapshot = { 
+    time: Date.now(), 
+    x: utilities.getRandomInt(0, 200), 
+    y: utilities.getRandomInt(0, 200),
+    color: utilities.getRandomBrightColor() 
+  };
+
+  socket.emit('initial', initialSnapshot);
+  initialSnapshot.id = socket.id;
+  socket.broadcast.emit('snapshot', initialSnapshot);
+
+  socket.on('commandInfo', (data) => {
+    const dataCopy = data;
+    dataCopy.id = socket.id;
+    setTimeout(() => {
+      socket.broadcast.emit('commandInfo', dataCopy);
+    }, SIMULATED_LATENCY);
+  });
+
+  socket.on('snapshot', (data) => {
+    const dataCopy = data;
+    dataCopy.id = socket.id;
+    setTimeout(() => {      
+      socket.broadcast.emit('snapshot', dataCopy);
+    }, SIMULATED_LATENCY);
+  });
+
+  socket.on('disconnect', () => {
+    socket.broadcast.emit('terminate', { id: socket.id, time: Date.now() });
   });
 });
