@@ -67,8 +67,8 @@ var LocalDeltaState = function LocalDeltaState(dT, physicsState) {
 
   this.rotation = physicsState.rotational * dT;
   if (this.rotation != 0) {
-    this.y = (-physicsState.medial * Math.cos(toRadians(this.rotation)) + physicsState.medial) / toRadians(physicsState.rotational);
-    this.x = physicsState.medial * Math.sin(toRadians(this.rotation)) / toRadians(physicsState.rotational);
+    this.x = -(-physicsState.medial * Math.cos(toRadians(this.rotation)) + physicsState.medial) / toRadians(physicsState.rotational);
+    this.y = physicsState.medial * Math.sin(toRadians(this.rotation)) / toRadians(physicsState.rotational);
   } else {
     this.x = 0;
     this.y = physicsState.medial * dT;
