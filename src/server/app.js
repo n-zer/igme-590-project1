@@ -30,6 +30,7 @@ io.on('connection', (socket) => {
     time: Date.now(),
     x: utilities.getRandomInt(0, 200),
     y: utilities.getRandomInt(0, 200),
+    rotation: 0,
     color: utilities.getRandomBrightColor(),
   };
 

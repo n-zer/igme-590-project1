@@ -1,9 +1,11 @@
 const commandsByType = {
-  toggle: {
+  move: {
     MOVE_FORWARD: "MOVE_FORWARD",
     MOVE_LEFT: "MOVE_LEFT",
     MOVE_BACKWARD: "MOVE_BACKWARD",
-    MOVE_RIGHT: "MOVE_RIGHT"
+    MOVE_RIGHT: "MOVE_RIGHT",
+    ROTATE_CW: "ROTATE_CW",
+    ROTATE_CCW: "ROTATE_CCW"
   },
   oneShot: {}  
 };
@@ -17,16 +19,16 @@ for(const type in commandsByType){
   }
 }
 
-const sortInsertionFromBack = (arr, newVal) => {
+const sortInsertionFromBack = (arr, newItem, valueFunc) => {
   if(arr.length === 0)
-    arr.push(newVal);
+    arr.push(newItem);
   for(let n = arr.length - 1; n>=0; n++){
-    if(newVal >= arr[n]){
-      arr.splice(n + 1, 0, newVal);
+    if(valueFunc(newItem) >= valueFunc(arr[n])){
+      arr.splice(n + 1, 0, newItem);
       return;
     }
   }
-  arr.splice(0, 0, newVal);
+  arr.splice(0, 0, newItem);
 };
 
 class CommandInfo {
@@ -38,21 +40,86 @@ class CommandInfo {
   }
 }
 
+const MOVE_SPEED = 100;
+const ROTATION_SPEED_DG = 90;
+
+const toRadians = (angle) => {
+  return angle * (Math.PI / 180);
+}
+
+// http://stackoverflow.com/questions/17410809/how-to-calculate-rotation-in-2d-in-javascript
+const rotate = (cx, cy, x, y, angle) => {
+  var radians = toRadians(angle),
+    cos = Math.cos(radians),
+    sin = Math.sin(radians),
+    nx = (cos * (x - cx)) + (sin * (y - cy)) + cx,
+    ny = (cos * (y - cy)) - (sin * (x - cx)) + cy;
+  return [nx, ny];
+};
+
+class LocalDeltaState {
+  constructor(dT, physicsState) {
+    this.rotation = physicsState.rotational * dT;
+    if(this.rotation != 0) {
+      this.y = (-physicsState.medial*Math.cos(toRadians(this.rotation)) + physicsState.medial)/toRadians(physicsState.rotational);
+      this.x = physicsState.medial*Math.sin(toRadians(this.rotation))/toRadians(physicsState.rotational);
+    }
+    else {
+      this.x = 0;
+      this.y = physicsState.medial * dT;
+    }
+  }
+}
+
+class PhysicsState {
+  constructor(inputState){
+    this.medial = inputState[commands.MOVE_FORWARD] * -MOVE_SPEED + inputState[commands.MOVE_BACKWARD] * MOVE_SPEED;
+    this.lateral = 0;
+    this.rotational = inputState[commands.ROTATE_CW] * ROTATION_SPEED_DG + inputState[commands.ROTATE_CCW] * -ROTATION_SPEED_DG;
+  }
+}
+
+class InputState {
+  constructor(forward, backward, cw, ccw) {
+    this[commands.MOVE_FORWARD] = forward;
+    this[commands.MOVE_BACKWARD] = backward;
+    this[commands.ROTATE_CW] = cw;
+    this[commands.ROTATE_CCW] = ccw;
+  }
+
+  applyCommandInfo(commandInfo) {
+    const newObj = InputState.copyConstruct(this);
+    newObj[commandInfo.command] = commandInfo.state;
+    return newObj;
+  }
+
+  static copyConstruct(other) {
+    return Object.assign(Object.create(Object.getPrototypeOf(other)), other);
+  }
+}
+
+class WorldState {
+  constructor(x, y, orientation) {
+    this.x = x;
+    this.y = y;
+    this.orientation = orientation;
+  }
+
+  applyDeltaState(deltaState) {
+    let rotatedDisplacement = rotate(0, 0, deltaState.x, deltaState.y, -this.orientation);
+    return new WorldState(this.x + rotatedDisplacement[0], this.y + rotatedDisplacement[1], this.orientation + deltaState.rotation);
+  }
+}
+
 class CommandLog {
   constructor() {
-    for(const key in commandsByType.toggle){
-      this[key] = {start:[], stop:[]};
-    }
-    for(const key in commandsByType.oneShot){
-      this[key] = [];
+    for(const type in commandsByType){
+      this[type] = [];
     }
   }
 
   insert(commandInfo){
-    if(commandInfo.type === "toggle")
-      sortInsertionFromBack(this[commandInfo.command][commandInfo.state], commandInfo.time);
-    else if(commandInfo.type === "oneShot" && commandInfo.state === "start")
-      sortInsertionFromBack(this[commandInfo.command], commandInfo.time);
+    sortInsertionFromBack(this[commandInfo.type], commandInfo, (ci) => ci.time);
   }
 }
 
@@ -66,16 +133,6 @@ let myCommandLog = new CommandLog();
 const otherAvatarSnapshots = {};
 const commandLogsByAvatar = {};
 
-// http://stackoverflow.com/questions/17410809/how-to-calculate-rotation-in-2d-in-javascript
-const rotate = (cx, cy, x, y, angle) => {
-  var radians = (Math.PI / 180) * angle,
-    cos = Math.cos(radians),
-    sin = Math.sin(radians),
-    nx = (cos * (x - cx)) + (sin * (y - cy)) + cx,
-    ny = (cos * (y - cy)) - (sin * (x - cx)) + cy;
-  return [nx, ny];
-};
-
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/utilities.js
 const worldPointToCameraSpace = (xw,yw, camera) => {
   var cameraToPointVector = [(xw-camera.x)*camera.zoom,(yw-camera.y)*camera.zoom];
@@ -85,9 +142,9 @@ const worldPointToCameraSpace = (xw,yw, camera) => {
 
 const keyToCommand = {
   w: commands.MOVE_FORWARD,
-  a: commands.MOVE_LEFT,
+  a: commands.ROTATE_CCW,
   s: commands.MOVE_BACKWARD,
-  d: commands.MOVE_RIGHT
+  d: commands.ROTATE_CW
 };
 
 const keyHandler = (state, e) => {
@@ -101,50 +158,35 @@ const keyHandler = (state, e) => {
   }
 };
 
-const getLinearDisplacementForDuration = (durationInMS) => {
-  return 20 * durationInMS/1000;
-}
+// Assumes bucket doesn't contain any commands dated before startTime
+const integrateMoveCommandBucketIntoLocalDelta = (startTime, currentTime, bucket, worldState) => {
+  const initialInputState = new InputState(false, false, false, false);
+  const initialPhysicsState = new PhysicsState(initialInputState);
+  const initialDT = ((bucket.length) ? bucket[0].time - startTime : currentTime - startTime) / 1000;
+  let newWorldState = worldState.applyDeltaState(new LocalDeltaState(initialDT, initialPhysicsState));
 
-const integrateToggleLogIntoDisplacement = (currentTime, toggleLog) => {
-  let displacement = 0;
-  let stopIndex = -1;
-  for(const index in toggleLog.start){
-    const startTime = toggleLog.start[index];
-    let matchingStop = toggleLog.stop[stopIndex];
-    let isLast = false;
+  let previousInputState = initialInputState;
 
-    do {
-      matchingStop = toggleLog.stop[++stopIndex];
-
-      if(matchingStop === undefined){
-        isLast = true;
-        break;
-      }
-    } while(matchingStop < startTime);
-
-    if(isLast){      
-      displacement += getLinearDisplacementForDuration(currentTime - startTime);
-      break;
-    }
-    else {
-      displacement += getLinearDisplacementForDuration(matchingStop - startTime);
-    }
+  for(let n = 0; n < bucket.length; n++) {
+    const endTime = (bucket[n + 1] && bucket[n + 1].time < currentTime) ? bucket[n + 1].time : currentTime;
+    const dT = (endTime - bucket[n].time) / 1000;
+    const inputState = previousInputState.applyCommandInfo(bucket[n]);
+    const physicsState = new PhysicsState(inputState);
+    newWorldState = newWorldState.applyDeltaState(new LocalDeltaState(dT, physicsState));
+    previousInputState = inputState;
   }
-  return displacement;
+
+  return newWorldState;
 }
 
 const integrateAvatar = (snapshot, commandLog) => {
   const currentTime = Date.now();
 
-  let xDisplacement = 0;
-  let yDisplacement = 0;
+  const initialWorldState = new WorldState(snapshot.x, snapshot.y, snapshot.rotation);
 
-  yDisplacement -= integrateToggleLogIntoDisplacement(currentTime, commandLog[commands.MOVE_FORWARD]);
-  yDisplacement += integrateToggleLogIntoDisplacement(currentTime, commandLog[commands.MOVE_BACKWARD]);
-  xDisplacement -= integrateToggleLogIntoDisplacement(currentTime, commandLog[commands.MOVE_LEFT]);
-  xDisplacement += integrateToggleLogIntoDisplacement(currentTime, commandLog[commands.MOVE_RIGHT]);
+  const newWorldState = integrateMoveCommandBucketIntoLocalDelta(snapshot.time, currentTime, commandLog.move, initialWorldState);
 
-  return { x: snapshot.x + xDisplacement, y: snapshot.y + yDisplacement, rotation: 0, color: snapshot.color };
+  return { x: newWorldState.x, y: newWorldState.y, rotation: newWorldState.orientation, color: snapshot.color };
 };
 
 const drawAvatar = (avatar, camera) => {
@@ -166,6 +208,7 @@ const drawLoop = () => {
     const myAvatar = integrateAvatar(myAvatarSnapshot, myCommandLog);
     camera.x = myAvatar.x;
     camera.y = myAvatar.y;
+    camera.rotation = myAvatar.rotation;
 
     for(const id in otherAvatarSnapshots){
       drawAvatar(integrateAvatar(otherAvatarSnapshots[id], commandLogsByAvatar[id]), camera);
@@ -227,30 +270,6 @@ const init = () => {
     receiveSnapshot(data);
   });
 
-  /*socket.on('initial', (data) => {
-    // Someone else's initial
-    if(data.id) {
-      console.log(`Initial for ${data.id} (${data.position[0]}, ${data.position[1]})`);
-      otherAvatarSnapshots[data.id] = {
-        x: data.position[0],
-        y: data.position[1],
-        time: data.time
-      };
-      //commandLogsByAvatar[data.id] = new CommandLog();
-    }
-    // Our initial
-    else {
-      console.log(`our initial (${data.position[0]}, ${data.position[1]})`);
-      myAvatarSnapshot = {
-        x: data.position[0],
-        y: data.position[1],
-        time: data.time
-      };
-
-      snapshotSendInterval = setInterval(() => {socket.emit('snapshot', myAvatarSnapshot)}, 3000);
-    }
-  });*/
-
   socket.on('terminate', (data) => {
     delete otherAvatarSnapshots[data.id];
     delete commandLogsByAvatar[data.id];
@@ -271,8 +290,8 @@ const init = () => {
 
   });
 
-  window.addEventListener('keydown', keyHandler.bind(null, 'start'));
-  window.addEventListener('keyup', keyHandler.bind(null, 'stop'));
+  window.addEventListener('keydown', keyHandler.bind(null, true));
+  window.addEventListener('keyup', keyHandler.bind(null, false));
 
   window.requestAnimationFrame(drawLoop);
 };

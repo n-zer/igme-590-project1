@@ -5,11 +5,13 @@ var _createClass = function () { function defineProperties(target, props) { for 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
 var commandsByType = {
-  toggle: {
+  move: {
     MOVE_FORWARD: "MOVE_FORWARD",
     MOVE_LEFT: "MOVE_LEFT",
     MOVE_BACKWARD: "MOVE_BACKWARD",
-    MOVE_RIGHT: "MOVE_RIGHT"
+    MOVE_RIGHT: "MOVE_RIGHT",
+    ROTATE_CW: "ROTATE_CW",
+    ROTATE_CCW: "ROTATE_CCW"
   },
   oneShot: {}
 };
@@ -23,15 +25,15 @@ for (var type in commandsByType) {
   }
 }
 
-var sortInsertionFromBack = function sortInsertionFromBack(arr, newVal) {
-  if (arr.length === 0) arr.push(newVal);
+var sortInsertionFromBack = function sortInsertionFromBack(arr, newItem, valueFunc) {
+  if (arr.length === 0) arr.push(newItem);
   for (var n = arr.length - 1; n >= 0; n++) {
-    if (newVal >= arr[n]) {
-      arr.splice(n + 1, 0, newVal);
+    if (valueFunc(newItem) >= valueFunc(arr[n])) {
+      arr.splice(n + 1, 0, newItem);
       return;
     }
   }
-  arr.splice(0, 0, newVal);
+  arr.splice(0, 0, newItem);
 };
 
 var CommandInfo = function CommandInfo(command, state) {
@@ -43,22 +45,106 @@ var CommandInfo = function CommandInfo(command, state) {
   this.state = state;
 };
 
+var MOVE_SPEED = 100;
+var ROTATION_SPEED_DG = 90;
+
+var toRadians = function toRadians(angle) {
+  return angle * (Math.PI / 180);
+};
+
+// http://stackoverflow.com/questions/17410809/how-to-calculate-rotation-in-2d-in-javascript
+var rotate = function rotate(cx, cy, x, y, angle) {
+  var radians = toRadians(angle),
+      cos = Math.cos(radians),
+      sin = Math.sin(radians),
+      nx = cos * (x - cx) + sin * (y - cy) + cx,
+      ny = cos * (y - cy) - sin * (x - cx) + cy;
+  return [nx, ny];
+};
+
+var LocalDeltaState = function LocalDeltaState(dT, physicsState) {
+  _classCallCheck(this, LocalDeltaState);
+
+  this.rotation = physicsState.rotational * dT;
+  if (this.rotation != 0) {
+    this.y = (-physicsState.medial * Math.cos(toRadians(this.rotation)) + physicsState.medial) / toRadians(physicsState.rotational);
+    this.x = physicsState.medial * Math.sin(toRadians(this.rotation)) / toRadians(physicsState.rotational);
+  } else {
+    this.x = 0;
+    this.y = physicsState.medial * dT;
+  }
+};
+
+var PhysicsState = function PhysicsState(inputState) {
+  _classCallCheck(this, PhysicsState);
+
+  this.medial = inputState[commands.MOVE_FORWARD] * -MOVE_SPEED + inputState[commands.MOVE_BACKWARD] * MOVE_SPEED;
+  this.lateral = 0;
+  this.rotational = inputState[commands.ROTATE_CW] * ROTATION_SPEED_DG + inputState[commands.ROTATE_CCW] * -ROTATION_SPEED_DG;
+};
+
+var InputState = function () {
+  function InputState(forward, backward, cw, ccw) {
+    _classCallCheck(this, InputState);
+
+    this[commands.MOVE_FORWARD] = forward;
+    this[commands.MOVE_BACKWARD] = backward;
+    this[commands.ROTATE_CW] = cw;
+    this[commands.ROTATE_CCW] = ccw;
+  }
+
+  _createClass(InputState, [{
+    key: "applyCommandInfo",
+    value: function applyCommandInfo(commandInfo) {
+      var newObj = InputState.copyConstruct(this);
+      newObj[commandInfo.command] = commandInfo.state;
+      return newObj;
+    }
+  }], [{
+    key: "copyConstruct",
+    value: function copyConstruct(other) {
+      return Object.assign(Object.create(Object.getPrototypeOf(other)), other);
+    }
+  }]);
+
+  return InputState;
+}();
+
+var WorldState = function () {
+  function WorldState(x, y, orientation) {
+    _classCallCheck(this, WorldState);
+
+    this.x = x;
+    this.y = y;
+    this.orientation = orientation;
+  }
+
+  _createClass(WorldState, [{
+    key: "applyDeltaState",
+    value: function applyDeltaState(deltaState) {
+      var rotatedDisplacement = rotate(0, 0, deltaState.x, deltaState.y, -this.orientation);
+      return new WorldState(this.x + rotatedDisplacement[0], this.y + rotatedDisplacement[1], this.orientation + deltaState.rotation);
+    }
+  }]);
+
+  return WorldState;
+}();
+
 var CommandLog = function () {
   function CommandLog() {
     _classCallCheck(this, CommandLog);
 
-    for (var key in commandsByType.toggle) {
-      this[key] = { start: [], stop: [] };
-    }
-    for (var _key in commandsByType.oneShot) {
-      this[_key] = [];
+    for (var _type in commandsByType) {
+      this[_type] = [];
     }
   }
 
   _createClass(CommandLog, [{
     key: "insert",
     value: function insert(commandInfo) {
-      if (commandInfo.type === "toggle") sortInsertionFromBack(this[commandInfo.command][commandInfo.state], commandInfo.time);else if (commandInfo.type === "oneShot" && commandInfo.state === "start") sortInsertionFromBack(this[commandInfo.command], commandInfo.time);
+      sortInsertionFromBack(this[commandInfo.type], commandInfo, function (ci) {
+        return ci.time;
+      });
     }
   }]);
 
@@ -75,16 +161,6 @@ var myCommandLog = new CommandLog();
 var otherAvatarSnapshots = {};
 var commandLogsByAvatar = {};
 
-// http://stackoverflow.com/questions/17410809/how-to-calculate-rotation-in-2d-in-javascript
-var rotate = function rotate(cx, cy, x, y, angle) {
-  var radians = Math.PI / 180 * angle,
-      cos = Math.cos(radians),
-      sin = Math.sin(radians),
-      nx = cos * (x - cx) + sin * (y - cy) + cx,
-      ny = cos * (y - cy) - sin * (x - cx) + cy;
-  return [nx, ny];
-};
-
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/utilities.js
 var worldPointToCameraSpace = function worldPointToCameraSpace(xw, yw, camera) {
   var cameraToPointVector = [(xw - camera.x) * camera.zoom, (yw - camera.y) * camera.zoom];
@@ -94,9 +170,9 @@ var worldPointToCameraSpace = function worldPointToCameraSpace(xw, yw, camera) {
 
 var keyToCommand = {
   w: commands.MOVE_FORWARD,
-  a: commands.MOVE_LEFT,
+  a: commands.ROTATE_CCW,
   s: commands.MOVE_BACKWARD,
-  d: commands.MOVE_RIGHT
+  d: commands.ROTATE_CW
 };
 
 var keyHandler = function keyHandler(state, e) {
@@ -110,49 +186,35 @@ var keyHandler = function keyHandler(state, e) {
   }
 };
 
-var getLinearDisplacementForDuration = function getLinearDisplacementForDuration(durationInMS) {
-  return 20 * durationInMS / 1000;
-};
+// Assumes bucket doesn't contain any commands dated before startTime
+var integrateMoveCommandBucketIntoLocalDelta = function integrateMoveCommandBucketIntoLocalDelta(startTime, currentTime, bucket, worldState) {
+  var initialInputState = new InputState(false, false, false, false);
+  var initialPhysicsState = new PhysicsState(initialInputState);
+  var initialDT = (bucket.length ? bucket[0].time - startTime : currentTime - startTime) / 1000;
+  var newWorldState = worldState.applyDeltaState(new LocalDeltaState(initialDT, initialPhysicsState));
 
-var integrateToggleLogIntoDisplacement = function integrateToggleLogIntoDisplacement(currentTime, toggleLog) {
-  var displacement = 0;
-  var stopIndex = -1;
-  for (var index in toggleLog.start) {
-    var startTime = toggleLog.start[index];
-    var matchingStop = toggleLog.stop[stopIndex];
-    var isLast = false;
+  var previousInputState = initialInputState;
 
-    do {
-      matchingStop = toggleLog.stop[++stopIndex];
-
-      if (matchingStop === undefined) {
-        isLast = true;
-        break;
-      }
-    } while (matchingStop < startTime);
-
-    if (isLast) {
-      displacement += getLinearDisplacementForDuration(currentTime - startTime);
-      break;
-    } else {
-      displacement += getLinearDisplacementForDuration(matchingStop - startTime);
-    }
+  for (var n = 0; n < bucket.length; n++) {
+    var endTime = bucket[n + 1] && bucket[n + 1].time < currentTime ? bucket[n + 1].time : currentTime;
+    var dT = (endTime - bucket[n].time) / 1000;
+    var inputState = previousInputState.applyCommandInfo(bucket[n]);
+    var physicsState = new PhysicsState(inputState);
+    newWorldState = newWorldState.applyDeltaState(new LocalDeltaState(dT, physicsState));
+    previousInputState = inputState;
   }
-  return displacement;
+
+  return newWorldState;
 };
 
 var integrateAvatar = function integrateAvatar(snapshot, commandLog) {
   var currentTime = Date.now();
 
-  var xDisplacement = 0;
-  var yDisplacement = 0;
+  var initialWorldState = new WorldState(snapshot.x, snapshot.y, snapshot.rotation);
 
-  yDisplacement -= integrateToggleLogIntoDisplacement(currentTime, commandLog[commands.MOVE_FORWARD]);
-  yDisplacement += integrateToggleLogIntoDisplacement(currentTime, commandLog[commands.MOVE_BACKWARD]);
-  xDisplacement -= integrateToggleLogIntoDisplacement(currentTime, commandLog[commands.MOVE_LEFT]);
-  xDisplacement += integrateToggleLogIntoDisplacement(currentTime, commandLog[commands.MOVE_RIGHT]);
+  var newWorldState = integrateMoveCommandBucketIntoLocalDelta(snapshot.time, currentTime, commandLog.move, initialWorldState);
 
-  return { x: snapshot.x + xDisplacement, y: snapshot.y + yDisplacement, rotation: 0, color: snapshot.color };
+  return { x: newWorldState.x, y: newWorldState.y, rotation: newWorldState.orientation, color: snapshot.color };
 };
 
 var drawAvatar = function drawAvatar(avatar, camera) {
@@ -174,6 +236,7 @@ var drawLoop = function drawLoop() {
     var myAvatar = integrateAvatar(myAvatarSnapshot, myCommandLog);
     camera.x = myAvatar.x;
     camera.y = myAvatar.y;
+    camera.rotation = myAvatar.rotation;
 
     for (var id in otherAvatarSnapshots) {
       drawAvatar(integrateAvatar(otherAvatarSnapshots[id], commandLogsByAvatar[id]), camera);
@@ -235,29 +298,6 @@ var init = function init() {
     receiveSnapshot(data);
   });
 
-  /*socket.on('initial', (data) => {
-    // Someone else's initial
-    if(data.id) {
-      console.log(`Initial for ${data.id} (${data.position[0]}, ${data.position[1]})`);
-      otherAvatarSnapshots[data.id] = {
-        x: data.position[0],
-        y: data.position[1],
-        time: data.time
-      };
-      //commandLogsByAvatar[data.id] = new CommandLog();
-    }
-    // Our initial
-    else {
-      console.log(`our initial (${data.position[0]}, ${data.position[1]})`);
-      myAvatarSnapshot = {
-        x: data.position[0],
-        y: data.position[1],
-        time: data.time
-      };
-        snapshotSendInterval = setInterval(() => {socket.emit('snapshot', myAvatarSnapshot)}, 3000);
-    }
-  });*/
-
   socket.on('terminate', function (data) {
     delete otherAvatarSnapshots[data.id];
     delete commandLogsByAvatar[data.id];
@@ -277,8 +317,8 @@ var init = function init() {
 
   socket.on('connect', function () {});
 
-  window.addEventListener('keydown', keyHandler.bind(null, 'start'));
-  window.addEventListener('keyup', keyHandler.bind(null, 'stop'));
+  window.addEventListener('keydown', keyHandler.bind(null, true));
+  window.addEventListener('keyup', keyHandler.bind(null, false));
 
   window.requestAnimationFrame(drawLoop);
 };
