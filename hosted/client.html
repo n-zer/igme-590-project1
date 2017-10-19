@@ -1,9 +1,15 @@
 <html>
 	<head>
+		<style>
+			* { margin:0; padding:0; } /* to remove the top and left whitespace */
+			html, body { width:100%; height:100%; } /* just to be sure these are full screen*/
+			canvas { display:block; } /* To remove the scrollbars */
+		</style>
 		<script src="/socket.io/socket.io.js"></script>
 		<script src="hosted/bundle.js"> </script>
 	</head>
 	<body>
 		<canvas id="mainCanvas" width="800" height="800"></canvas>
+		<input id="inputBox" type="text" style="display:none;position:absolute;left:25%;text-align:center;top:75%;width:50%;"/>
 	</body>
 </html>

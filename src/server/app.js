@@ -65,4 +65,9 @@ io.on('connection', (socket) => {
     socket.leave(roomString);
     roomCounts[roomNumber]--;
   });
+
+  socket.on('message', (data) => {
+    const obj = { id: socket.id, message: data };
+    socket.broadcast.to(roomString).emit('message', obj);
+  });
 });

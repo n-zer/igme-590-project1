@@ -50,6 +50,43 @@ var lerp = function lerp(from, to, percent) {
   return from * (1.0 - percent) + to * percent;
 };
 
+var correctOrientation = function correctOrientation(orientation) {
+  while (orientation > 180) {
+    orientation -= 360;
+  }while (orientation < -180) {
+    orientation += 360;
+  }return orientation;
+};
+
+var Camera = function () {
+  function Camera(canvas) {
+    _classCallCheck(this, Camera);
+
+    this.x = 0;
+    this.y = 0;
+    this.rotation = 0;
+    this.zoom = 1;
+    this.minZoom = .0001;
+    this.maxZoom = 5;
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+  }
+
+  _createClass(Camera, [{
+    key: "width",
+    get: function get() {
+      return this.canvas.width;
+    }
+  }, {
+    key: "height",
+    get: function get() {
+      return this.canvas.height;
+    }
+  }]);
+
+  return Camera;
+}();
+
 var CommandInfo = function CommandInfo(command, state) {
   _classCallCheck(this, CommandInfo);
 
@@ -79,7 +116,7 @@ var rotate = function rotate(cx, cy, x, y, angle) {
 var LocalDeltaState = function LocalDeltaState(dT, physicsState) {
   _classCallCheck(this, LocalDeltaState);
 
-  this.rotation = physicsState.rotational * dT;
+  this.rotation = correctOrientation(physicsState.rotational * dT);
   if (this.rotation != 0) {
     this.x = -(-physicsState.medial * Math.cos(toRadians(this.rotation)) + physicsState.medial) / toRadians(physicsState.rotational);
     this.y = physicsState.medial * Math.sin(toRadians(this.rotation)) / toRadians(physicsState.rotational);
@@ -137,8 +174,7 @@ var WorldState = function () {
     key: "applyDeltaState",
     value: function applyDeltaState(deltaState) {
       var rotatedDisplacement = rotate(0, 0, deltaState.x, deltaState.y, -this.orientation);
-      var newOrientation = this.orientation + deltaState.rotation;
-      if (newOrientation > 180) newOrientation -= 360;else if (newOrientation < -180) newOrientation += 360;
+      var newOrientation = correctOrientation(this.orientation + deltaState.rotation);
       return new WorldState(this.x + rotatedDisplacement[0], this.y + rotatedDisplacement[1], newOrientation);
     }
   }]);
@@ -242,14 +278,66 @@ var CommandLog = function () {
   return CommandLog;
 }();
 
+// https://stackoverflow.com/questions/5026961/html5-canvas-ctx-filltext-wont-do-line-breaks/21574562#21574562
+
+
+var fillTextMultiLine = function fillTextMultiLine(ctx, text, x, y) {
+  var lineHeight = ctx.measureText("M").width * 1.2;
+  var lines = text.split("\n");
+  for (var i = lines.length - 1; i >= 0; --i) {
+    ctx.fillText(lines[i], x, y);
+    y -= lineHeight;
+  }
+};
+
+var MESSAGE_DURATION_MS = 5000;
+
+var MessageLog = function () {
+  function MessageLog() {
+    _classCallCheck(this, MessageLog);
+
+    this.messages = [];
+  }
+
+  _createClass(MessageLog, [{
+    key: "getString",
+    value: function getString(time) {
+      var resultString = "";
+      var pruneCount = 0;
+      for (var n = 0; n < this.messages.length; n++) {
+        if (this.messages[n].time + MESSAGE_DURATION_MS < time) {
+          pruneCount = n + 1;
+          continue;
+        }
+        resultString += this.messages[n].message + "\n";
+      }
+      this.messages.splice(0, pruneCount);
+      return resultString;
+    }
+  }, {
+    key: "insertMessage",
+    value: function insertMessage(message) {
+      sortInsertionFromBack(this.messages, message, function (m) {
+        return m.time;
+      });
+    }
+  }]);
+
+  return MessageLog;
+}();
+
+var startTime = 0;
 var socket = void 0;
 var canvas = void 0;
 var context = void 0;
+var inputBox = void 0;
 var camera = void 0;
 var starCamera = void 0;
 var gridCamera = void 0;
 var myCommandLog = void 0;
+var myMessageLog = new MessageLog();
 var commandLogsByAvatar = {};
+var messageLogsByAvatar = {};
 
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/main.js
 var stars = {
@@ -286,8 +374,8 @@ var shipVertices = [[-20, 17], [0, 7], [20, 17], [0, -23]];
 
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/constructors.js
 var generateStarField = function generateStarField(stars) {
-  var lower = -50000;
-  var upper = 50000;
+  var lower = -100000;
+  var upper = 100000;
   var maxRadius = 100;
   var minRadius = 50;
   for (var c = 0; c < 500; c++) {
@@ -318,9 +406,30 @@ var keyToCommand = {
 var COMMANDS_PER_SNAPSHOT = 10;
 var shouldSendSnapshot = false;
 var commandCounter = 0;
+var enteringText = false;
+
 var keyHandler = function keyHandler(state, e) {
+  if (state === true && e.repeat === false && e.key === "Enter") {
+    if (!enteringText) {
+      enteringText = true;
+      inputBox.value = "";
+      inputBox.style.display = 'inline-block';
+      inputBox.focus();
+    } else {
+      enteringText = false;
+      inputBox.blur();
+      inputBox.style.display = 'none';
+      var message = inputBox.value;
+      if (message) {
+        socket.emit('message', message);
+        myMessageLog.insertMessage({ message: message, time: Date.now() });
+      }
+      inputBox.value = "";
+    }
+    return;
+  }
   var command = keyToCommand[e.key];
-  if (command && e.repeat == false) {
+  if (!enteringText && command && e.repeat === false) {
     var commandInfo = new CommandInfo(command, state);
     myCommandLog.insertCommand(commandInfo);
     socket.emit('commandInfo', commandInfo);
@@ -484,6 +593,34 @@ var drawGrid = function drawGrid(grid, camera) {
   }
 };
 
+var drawMessages = function drawMessages(snapshot, messageLog, camera) {
+  var snapshotPositionInCameraSpace = worldPointToCameraSpace(snapshot.worldState.x, snapshot.worldState.y, camera);
+  var messageString = messageLog.getString(snapshot.time);
+
+  if (messageString) {
+    var ctx = camera.ctx;
+
+    ctx.save();
+    ctx.font = "20px Arial";
+    ctx.fillStyle = snapshot.color;
+    ctx.textAlign = "center";
+    fillTextMultiLine(camera.ctx, messageString, snapshotPositionInCameraSpace[0], snapshotPositionInCameraSpace[1] - 50);
+    ctx.restore();
+  }
+};
+
+var drawTutorial = function drawTutorial(camera) {
+  var ctx = camera.ctx;
+
+  ctx.save();
+  ctx.fillStyle = "white";
+  ctx.font = "30px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText("Use WASD to move around", camera.width * 0.1, camera.height * .25);
+  ctx.fillText("Press Enter to chat", camera.width * 0.1, camera.height * .35);
+  ctx.restore();
+};
+
 var linkCameraWithOffset = function linkCameraWithOffset(mainCamera, dependentCamera, offset) {
   dependentCamera.x = mainCamera.x;
   dependentCamera.y = mainCamera.y;
@@ -504,17 +641,17 @@ var drawLoop = function drawLoop() {
     var snapshot = integrateCommandLogIntoSnapshot(currentTime, myCommandLog);
     camera.x = lerp(camera.x, snapshot.worldState.x, MOVE_SPEED / 10000);
     camera.y = lerp(camera.y, snapshot.worldState.y, MOVE_SPEED / 10000);
-    var rotDiff = snapshot.worldState.orientation - camera.rotation;
-    if (rotDiff > 180) rotDiff -= 360;else if (rotDiff < -180) rotDiff += 360;
-    camera.rotation += lerp(0, rotDiff, ROTATION_SPEED_DG / 5000);
-    if (camera.rotation > 180) camera.rotation -= 360;else if (camera.rotation < -180) camera.rotation += 360;
+    var rotDiff = correctOrientation(snapshot.worldState.orientation - camera.rotation);
+    camera.rotation = correctOrientation(camera.rotation + lerp(0, rotDiff, ROTATION_SPEED_DG / 5000));
 
     linkCameraWithOffset(camera, starCamera, 100);
     linkCameraWithOffset(camera, gridCamera, 1);
 
     var integratedSnapshots = [];
+    var messageLogs = [];
     for (var id in commandLogsByAvatar) {
       integratedSnapshots.push(integrateCommandLogIntoSnapshot(currentTime, commandLogsByAvatar[id]));
+      messageLogs.push(messageLogsByAvatar[id]);
     }
     drawProjectionLines(snapshot, camera, gridCamera);
     for (var index in integratedSnapshots) {
@@ -524,6 +661,13 @@ var drawLoop = function drawLoop() {
       drawAvatar(integratedSnapshots[_index], camera);
     }
     drawAvatar(snapshot, camera);
+    for (var _index2 in messageLogs) {
+      if (messageLogs[_index2]) drawMessages(integratedSnapshots[_index2], messageLogs[_index2], camera);
+    }
+    drawMessages(snapshot, myMessageLog, camera);
+
+    if (currentTime - startTime < 20000) drawTutorial(camera);
+
     if (shouldSendSnapshot) {
       myCommandLog.insertSnapshot(snapshot);
       socket.emit('snapshot', snapshot);
@@ -538,52 +682,19 @@ var init = function init() {
   socket = io.connect();
 
   canvas = document.querySelector('#mainCanvas');
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  window.addEventListener('resize', function () {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  });
   context = canvas.getContext('2d');
 
-  camera = {
-    //position/rotation
-    x: 0,
-    y: 0,
-    rotation: 0,
-    //scale value, basically
-    zoom: 1,
-    minZoom: .0001,
-    maxZoom: 5,
-    //screen dimensions
-    width: canvas.width,
-    height: canvas.height,
-    ctx: context
-  };
+  inputBox = document.querySelector("#inputBox");
 
-  starCamera = {
-    //position/rotation
-    x: 0,
-    y: 0,
-    rotation: 0,
-    //scale value, basically
-    zoom: 1,
-    minZoom: .0001,
-    maxZoom: 5,
-    //screen dimensions
-    width: canvas.width,
-    height: canvas.height,
-    ctx: context
-  };
-
-  gridCamera = {
-    //position/rotation
-    x: 0,
-    y: 0,
-    rotation: 0,
-    //scale value, basically
-    zoom: 1,
-    minZoom: .0001,
-    maxZoom: 5,
-    //screen dimensions
-    width: canvas.width,
-    height: canvas.height,
-    ctx: context
-  };
+  camera = new Camera(canvas);
+  starCamera = new Camera(canvas);
+  gridCamera = new Camera(canvas);
 
   generateStarField(stars);
 
@@ -606,14 +717,20 @@ var init = function init() {
       commandLogsByAvatar[data.id].insertSnapshot(new Snapshot(new WorldState(data.x, data.y, data.rotation), new InputState(false, false, false, false), data.time, data.color));
     } else {
       myCommandLog = new CommandLog();
-
-      //console.log(`our initial (${data.x}, ${data.y})`);
       myCommandLog.insertSnapshot(new Snapshot(new WorldState(data.x, data.y, data.rotation), new InputState(false, false, false, false), data.time, data.color));
+      startTime = Date.now();
     }
+  });
+
+  socket.on('message', function (data) {
+    if (!messageLogsByAvatar[data.id]) messageLogsByAvatar[data.id] = new MessageLog();
+    data.time = Date.now();
+    messageLogsByAvatar[data.id].insertMessage(data);
   });
 
   socket.on('terminate', function (data) {
     delete commandLogsByAvatar[data.id];
+    delete messageLogsByAvatar[data.id];
   });
 
   var clearObject = function clearObject(obj) {
@@ -624,9 +741,8 @@ var init = function init() {
 
   socket.on('disconnect', function () {
     clearObject(commandLogsByAvatar);
+    clearObject(messageLogsByAvatar);
   });
-
-  socket.on('connect', function () {});
 
   window.addEventListener('keydown', keyHandler.bind(null, true));
   window.addEventListener('keyup', keyHandler.bind(null, false));

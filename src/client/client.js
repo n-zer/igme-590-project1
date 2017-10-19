@@ -45,6 +45,36 @@ const lerp = (from, to, percent) => {
   return (from * (1.0 - percent)) + (to * percent);
 };
 
+const correctOrientation = (orientation) => {
+  while (orientation > 180)
+    orientation -= 360;
+  while (orientation < -180)
+    orientation += 360;
+
+  return orientation;
+};
+
+class Camera {
+  constructor(canvas) {
+    this.x = 0;
+    this.y = 0;
+    this.rotation = 0;
+    this.zoom = 1;
+    this.minZoom = .0001;
+    this.maxZoom = 5;
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+  }
+
+  get width() {
+    return this.canvas.width;
+  }
+
+  get height() {
+    return this.canvas.height;
+  }
+}
+
 class CommandInfo {
   constructor(command, state) {
     this.command = command;
@@ -73,7 +103,7 @@ const rotate = (cx, cy, x, y, angle) => {
 
 class LocalDeltaState {
   constructor(dT, physicsState) {
-    this.rotation = physicsState.rotational * dT;
+    this.rotation = correctOrientation(physicsState.rotational * dT);
     if(this.rotation != 0) {
       this.x = -(-physicsState.medial*Math.cos(toRadians(this.rotation)) + physicsState.medial)/toRadians(physicsState.rotational);
       this.y = physicsState.medial*Math.sin(toRadians(this.rotation))/toRadians(physicsState.rotational);
@@ -121,11 +151,7 @@ class WorldState {
 
   applyDeltaState(deltaState) {
     let rotatedDisplacement = rotate(0, 0, deltaState.x, deltaState.y, -this.orientation);
-    let newOrientation = this.orientation + deltaState.rotation;
-    if(newOrientation > 180)
-      newOrientation -= 360;
-    else if(newOrientation < -180)
-      newOrientation += 360;
+    let newOrientation = correctOrientation(this.orientation + deltaState.rotation);
     return new WorldState(this.x + rotatedDisplacement[0], this.y + rotatedDisplacement[1], newOrientation);
   }
 }
@@ -210,14 +236,54 @@ class CommandLog {
   }
 }
 
+// https://stackoverflow.com/questions/5026961/html5-canvas-ctx-filltext-wont-do-line-breaks/21574562#21574562
+const fillTextMultiLine = (ctx, text, x, y) => {
+  var lineHeight = ctx.measureText("M").width * 1.2;
+  var lines = text.split("\n");
+  for (var i = lines.length - 1; i >= 0; --i) {
+    ctx.fillText(lines[i], x, y);
+    y -= lineHeight;
+  }
+};
+
+const MESSAGE_DURATION_MS = 5000;
+
+class MessageLog {
+  constructor() {
+    this.messages = [];
+  }
+
+  getString(time) {
+    let resultString = "";
+    let pruneCount = 0;
+    for(let n = 0; n < this.messages.length; n++) {
+      if(this.messages[n].time + MESSAGE_DURATION_MS < time) {
+        pruneCount = n + 1;
+        continue;
+      }
+      resultString += `${this.messages[n].message}\n`;
+    }
+    this.messages.splice(0, pruneCount);
+    return resultString;
+  }
+
+  insertMessage(message) {
+    sortInsertionFromBack(this.messages, message, (m) => m.time);
+  }
+}
+
+let startTime = 0;
 let socket;
 let canvas;
 let context;
+let inputBox;
 let camera;
 let starCamera;
 let gridCamera;
 let myCommandLog;
+let myMessageLog = new MessageLog();
 const commandLogsByAvatar = {};
+const messageLogsByAvatar = {};
 
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/main.js
 const stars = {
@@ -268,8 +334,8 @@ const shipVertices = [
 
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/constructors.js
 const generateStarField = (stars) => {
-  const lower = -50000;
-  const upper = 50000;
+  const lower = -100000;
+  const upper = 100000;
   const maxRadius = 100;
   const minRadius = 50;
   for(let c = 0; c < 500; c++){
@@ -300,9 +366,31 @@ const keyToCommand = {
 const COMMANDS_PER_SNAPSHOT = 10;
 let shouldSendSnapshot = false;
 let commandCounter = 0;
+let enteringText = false;
+
 const keyHandler = (state, e) => {
+  if(state === true && e.repeat === false && e.key === "Enter") {
+    if(!enteringText) {
+      enteringText = true;
+      inputBox.value = "";
+      inputBox.style.display = 'inline-block';
+      inputBox.focus();
+    }
+    else {
+      enteringText = false;
+      inputBox.blur();
+      inputBox.style.display = 'none';
+      const message = inputBox.value;
+      if(message) {
+        socket.emit('message', message);
+        myMessageLog.insertMessage({message: message, time: Date.now()});
+      }
+      inputBox.value = "";
+    }
+    return;
+  }
   const command = keyToCommand[e.key];
-  if(command && e.repeat == false) {
+  if(!enteringText && command && e.repeat === false) {
     const commandInfo = new CommandInfo(command, state)
     myCommandLog.insertCommand(commandInfo);
     socket.emit('commandInfo', commandInfo);
@@ -479,6 +567,34 @@ const drawGrid = (grid, camera) => {
   }
 };
 
+const drawMessages = (snapshot, messageLog, camera) => {
+  const snapshotPositionInCameraSpace = worldPointToCameraSpace(snapshot.worldState.x, snapshot.worldState.y, camera);
+  const messageString = messageLog.getString(snapshot.time);
+
+  if(messageString) {
+    const ctx = camera.ctx;
+
+    ctx.save()
+    ctx.font = "20px Arial";
+    ctx.fillStyle = snapshot.color;
+    ctx.textAlign = "center";
+    fillTextMultiLine(camera.ctx, messageString, snapshotPositionInCameraSpace[0], snapshotPositionInCameraSpace[1] - 50);
+    ctx.restore();
+  }
+};
+
+const drawTutorial = (camera) => {
+  const ctx = camera.ctx;
+
+  ctx.save();
+  ctx.fillStyle = "white";
+  ctx.font = "30px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText("Use WASD to move around", camera.width * 0.1, camera.height * .25);
+  ctx.fillText("Press Enter to chat", camera.width * 0.1, camera.height * .35);
+  ctx.restore();
+};
+
 const linkCameraWithOffset = (mainCamera, dependentCamera, offset) => {
   dependentCamera.x = mainCamera.x;
   dependentCamera.y = mainCamera.y;
@@ -499,23 +615,17 @@ const drawLoop = () => {
     const snapshot = integrateCommandLogIntoSnapshot(currentTime, myCommandLog);
     camera.x = lerp(camera.x, snapshot.worldState.x, MOVE_SPEED / 10000);
     camera.y = lerp(camera.y, snapshot.worldState.y, MOVE_SPEED / 10000);
-    var rotDiff = snapshot.worldState.orientation - camera.rotation;
-    if(rotDiff>180)
-      rotDiff-=360;
-    else if(rotDiff<-180)
-      rotDiff+=360;
-    camera.rotation += lerp(0, rotDiff, ROTATION_SPEED_DG / 5000);
-    if(camera.rotation>180)
-      camera.rotation-=360;
-    else if(camera.rotation<-180)
-      camera.rotation+=360;
+    var rotDiff = correctOrientation(snapshot.worldState.orientation - camera.rotation);
+    camera.rotation = correctOrientation(camera.rotation + lerp(0, rotDiff, ROTATION_SPEED_DG / 5000));
 
     linkCameraWithOffset(camera, starCamera, 100);
     linkCameraWithOffset(camera, gridCamera, 1);
 
     const integratedSnapshots = [];
+    const messageLogs = [];
     for(const id in commandLogsByAvatar){
       integratedSnapshots.push(integrateCommandLogIntoSnapshot(currentTime, commandLogsByAvatar[id]));
+      messageLogs.push(messageLogsByAvatar[id]);
     }
     drawProjectionLines(snapshot, camera, gridCamera);
     for(const index in integratedSnapshots) {
@@ -525,6 +635,15 @@ const drawLoop = () => {
       drawAvatar(integratedSnapshots[index], camera);
     }
     drawAvatar(snapshot, camera);
+    for(const index in messageLogs) {
+      if(messageLogs[index])
+        drawMessages(integratedSnapshots[index], messageLogs[index], camera);
+    }
+    drawMessages(snapshot, myMessageLog, camera);
+
+    if(currentTime - startTime < 20000)
+      drawTutorial(camera);
+
     if(shouldSendSnapshot) {
       myCommandLog.insertSnapshot(snapshot);
       socket.emit('snapshot', snapshot);
@@ -539,52 +658,19 @@ const init = () => {
   socket = io.connect();
 
   canvas = document.querySelector('#mainCanvas');
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  window.addEventListener('resize', () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  });
   context = canvas.getContext('2d');
+  
+  inputBox = document.querySelector("#inputBox");
 
-  camera = {
-    //position/rotation
-    x:0,
-    y:0,
-    rotation:0,
-    //scale value, basically
-    zoom:1,
-    minZoom:.0001,
-    maxZoom:5,
-    //screen dimensions
-    width:canvas.width,
-    height:canvas.height,
-    ctx: context
-  };
-
-  starCamera = {
-    //position/rotation
-    x:0,
-    y:0,
-    rotation:0,
-    //scale value, basically
-    zoom:1,
-    minZoom:.0001,
-    maxZoom:5,
-    //screen dimensions
-    width:canvas.width,
-    height:canvas.height,
-    ctx: context
-  };
-
-  gridCamera = {
-    //position/rotation
-    x:0,
-    y:0,
-    rotation:0,
-    //scale value, basically
-    zoom:1,
-    minZoom:.0001,
-    maxZoom:5,
-    //screen dimensions
-    width:canvas.width,
-    height:canvas.height,
-    ctx: context
-  };
+  camera = new Camera(canvas);
+  starCamera = new Camera(canvas);
+  gridCamera = new Camera(canvas);
 
   generateStarField(stars);
 
@@ -610,14 +696,21 @@ const init = () => {
     }
     else {
       myCommandLog = new CommandLog();
-
-      //console.log(`our initial (${data.x}, ${data.y})`);
       myCommandLog.insertSnapshot(new Snapshot(new WorldState(data.x, data.y, data.rotation), new InputState(false, false, false, false), data.time, data.color));
+      startTime = Date.now();
     }
+  });
+
+  socket.on('message', (data) => {
+    if(!messageLogsByAvatar[data.id])
+      messageLogsByAvatar[data.id] = new MessageLog();
+    data.time = Date.now();
+    messageLogsByAvatar[data.id].insertMessage(data);
   });
 
   socket.on('terminate', (data) => {
     delete commandLogsByAvatar[data.id];
+    delete messageLogsByAvatar[data.id];
   });
 
   const clearObject = (obj) => {
@@ -626,10 +719,7 @@ const init = () => {
 
   socket.on('disconnect', () => {
     clearObject(commandLogsByAvatar);
-  });
-
-  socket.on('connect', () => {
-
+    clearObject(messageLogsByAvatar);
   });
 
   window.addEventListener('keydown', keyHandler.bind(null, true));
