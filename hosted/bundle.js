@@ -4,6 +4,9 @@ var _createClass = function () { function defineProperties(target, props) { for 
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
+// ---------- Commands ---------- //
+
+// Organized by type
 var commandsByType = {
   move: {
     MOVE_FORWARD: "MOVE_FORWARD",
@@ -15,8 +18,13 @@ var commandsByType = {
   }
 };
 
+// Dictionary of all commands, populated at run-time
 var commands = {};
+
+// Dictionary with commands as keys and types as values, populated at run-time
 var commandTypes = {};
+
+// Population
 for (var type in commandsByType) {
   for (var command in commandsByType[type]) {
     commandTypes[command] = type;
@@ -24,6 +32,18 @@ for (var type in commandsByType) {
   }
 }
 
+// Translates keyboard keys to commands
+var keyToCommand = {
+  w: commands.MOVE_FORWARD,
+  a: commands.ROTATE_CCW,
+  s: commands.MOVE_BACKWARD,
+  d: commands.ROTATE_CW
+};
+
+// ---------- Utilities ---------- //
+
+// Insertion sort in ascending order, checks from back to front
+// valueFunc is used to fetch the value to be compared, in case the item is an object
 var sortInsertionFromBack = function sortInsertionFromBack(arr, newItem, valueFunc) {
   if (arr.length === 0) {
     arr.push(newItem);
@@ -39,6 +59,8 @@ var sortInsertionFromBack = function sortInsertionFromBack(arr, newItem, valueFu
   return 0;
 };
 
+// Same as above, but only finds the index at which the new item would be inserted
+// evalFunc must return the value directly from a closure
 var searchFromBack = function searchFromBack(arr, evalFunc) {
   for (var n = arr.length - 1; n >= 0; n--) {
     if (evalFunc(arr[n])) return n;
@@ -50,6 +72,7 @@ var lerp = function lerp(from, to, percent) {
   return from * (1.0 - percent) + to * percent;
 };
 
+// Translates an arbitrary orientation into the range of -180 to 180
 var correctOrientation = function correctOrientation(orientation) {
   while (orientation > 180) {
     orientation -= 360;
@@ -57,6 +80,58 @@ var correctOrientation = function correctOrientation(orientation) {
     orientation += 360;
   }return orientation;
 };
+
+var toRadians = function toRadians(angle) {
+  return angle * (Math.PI / 180);
+};
+
+// Rotates (x, y) angle degrees around (cx, cy)
+// http://stackoverflow.com/questions/17410809/how-to-calculate-rotation-in-2d-in-javascript
+var rotate = function rotate(cx, cy, x, y, angle) {
+  var radians = toRadians(angle),
+      cos = Math.cos(radians),
+      sin = Math.sin(radians),
+      nx = cos * (x - cx) + sin * (y - cy) + cx,
+      ny = cos * (y - cy) - sin * (x - cx) + cy;
+  return [nx, ny];
+};
+
+// Multi-line text helper for canvas
+// https://stackoverflow.com/questions/5026961/html5-canvas-ctx-filltext-wont-do-line-breaks/21574562#21574562
+var fillTextMultiLine = function fillTextMultiLine(ctx, text, x, y) {
+  var lineHeight = ctx.measureText("M").width * 1.2;
+  var lines = text.split("\n");
+  for (var i = lines.length - 1; i >= 0; --i) {
+    ctx.fillText(lines[i], x, y);
+    y -= lineHeight;
+  }
+};
+
+// Converts the point (xw, yw) in world coordinates to camera space for the given camera
+// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/utilities.js
+var worldPointToCameraSpace = function worldPointToCameraSpace(xw, yw, camera) {
+  var cameraToPointVector = [(xw - camera.x) * camera.zoom, (yw - camera.y) * camera.zoom];
+  var rotatedVector = rotate(0, 0, cameraToPointVector[0], cameraToPointVector[1], camera.rotation);
+  return [camera.width / 2 + rotatedVector[0], camera.height / 2 + rotatedVector[1]];
+};
+
+var clearObject = function clearObject(obj) {
+  Object.keys(obj).forEach(function (k) {
+    return delete obj[k];
+  });
+};
+
+// ---------- Constants ---------- //
+
+var MOVE_SPEED = 1000; // Forward/backward movespeed in pixels per second
+var ROTATION_SPEED_DG = 180; // Rotation speed in degrees per second
+var MESSAGE_DURATION_MS = 5000; // Duration after which messages will fade, in milliseconds
+var COMMANDS_PER_SNAPSHOT = 10; // A new snapshot will be generated after this number of commands
+
+
+// ---------- Classes ----------//
+
+// Zoomable camera attached to a canvas
 
 var Camera = function () {
   function Camera(canvas) {
@@ -87,31 +162,20 @@ var Camera = function () {
   return Camera;
 }();
 
+// Information about a single command
+
+
 var CommandInfo = function CommandInfo(command, state) {
   _classCallCheck(this, CommandInfo);
 
-  this.command = command;
-  this.time = Date.now();
-  this.type = commandTypes[command];
-  this.state = state;
+  this.command = command; // A member of the commands object
+  this.time = Date.now(); // Time at which the command was given
+  this.type = commandTypes[command]; // A member of the commandsByType object
+  this.state = state; // True for the start of the command (press), false for the end (release)
 };
 
-var MOVE_SPEED = 1000;
-var ROTATION_SPEED_DG = 180;
+// A delta that can be applied to a WorldState, created by integrating a PhysicsState over a period of time (dT)
 
-var toRadians = function toRadians(angle) {
-  return angle * (Math.PI / 180);
-};
-
-// http://stackoverflow.com/questions/17410809/how-to-calculate-rotation-in-2d-in-javascript
-var rotate = function rotate(cx, cy, x, y, angle) {
-  var radians = toRadians(angle),
-      cos = Math.cos(radians),
-      sin = Math.sin(radians),
-      nx = cos * (x - cx) + sin * (y - cy) + cx,
-      ny = cos * (y - cy) - sin * (x - cx) + cy;
-  return [nx, ny];
-};
 
 var LocalDeltaState = function LocalDeltaState(dT, physicsState) {
   _classCallCheck(this, LocalDeltaState);
@@ -126,13 +190,20 @@ var LocalDeltaState = function LocalDeltaState(dT, physicsState) {
   }
 };
 
+// Describes an object's instantaneous (i.e. velocities) motion in its local coordinate system
+// Inferred from an InputState
+
+
 var PhysicsState = function PhysicsState(inputState) {
   _classCallCheck(this, PhysicsState);
 
-  this.medial = inputState[commands.MOVE_FORWARD] * -MOVE_SPEED + inputState[commands.MOVE_BACKWARD] * MOVE_SPEED;
-  this.lateral = 0;
+  this.medial = inputState[commands.MOVE_FORWARD] * -MOVE_SPEED + inputState[commands.MOVE_BACKWARD] * MOVE_SPEED; // Forward/backward
+  this.lateral = 0; // Left/right (I'm ignoring this because I haven't figured out the math for it yet)
   this.rotational = inputState[commands.ROTATE_CW] * ROTATION_SPEED_DG + inputState[commands.ROTATE_CCW] * -ROTATION_SPEED_DG;
 };
+
+// Describes the state of any commands that may be acting on the object
+
 
 var InputState = function () {
   function InputState(forward, backward, cw, ccw) {
@@ -144,6 +215,9 @@ var InputState = function () {
     this[commands.ROTATE_CCW] = ccw;
   }
 
+  // Returns a copy of this InputState with the given command applied to it
+
+
   _createClass(InputState, [{
     key: "applyCommandInfo",
     value: function applyCommandInfo(commandInfo) {
@@ -151,6 +225,9 @@ var InputState = function () {
       newObj[commandInfo.command] = commandInfo.state;
       return newObj;
     }
+
+    // Returns a shallow copy of the given object
+
   }], [{
     key: "copyConstruct",
     value: function copyConstruct(other) {
@@ -161,6 +238,9 @@ var InputState = function () {
   return InputState;
 }();
 
+// Represents an object's positional data in the world coordinate space
+
+
 var WorldState = function () {
   function WorldState(x, y, orientation) {
     _classCallCheck(this, WorldState);
@@ -169,6 +249,9 @@ var WorldState = function () {
     this.y = y;
     this.orientation = orientation;
   }
+
+  // Returns a copy of this WorldState with the given LocalDeltaState applied to it
+
 
   _createClass(WorldState, [{
     key: "applyDeltaState",
@@ -182,6 +265,9 @@ var WorldState = function () {
   return WorldState;
 }();
 
+// A collection of all the state data needed to render an object at or beyond a particular point in time
+
+
 var Snapshot = function () {
   function Snapshot(worldState, inputState, time, color) {
     _classCallCheck(this, Snapshot);
@@ -191,6 +277,11 @@ var Snapshot = function () {
     this.time = time;
     this.color = color;
   }
+
+  // Creates a snapshot from a shallow copy of a snapshot without the correct prototype information
+  // This is necessary because socket.io strips prototype data when sending things across the network,
+  // and we need to send snapshots across the network
+
 
   _createClass(Snapshot, null, [{
     key: "createFromObject",
@@ -202,6 +293,9 @@ var Snapshot = function () {
   return Snapshot;
 }();
 
+// A running log of snapshots and commands for a particular object that can be used to render the object at any point in time
+
+
 var CommandLog = function () {
   function CommandLog() {
     _classCallCheck(this, CommandLog);
@@ -210,11 +304,16 @@ var CommandLog = function () {
     this.indexOffsets = {};
     this.MAX_SNAPSHOTS = 20;
     this.MAX_SNAPSHOT_OVERFLOW = 5;
+
+    // Create a command bucket for each type of command
     for (var _type in commandsByType) {
       this[_type] = [];
       this.indexOffsets[_type] = 0;
     }
   }
+
+  // Inserts a command into the command log
+
 
   _createClass(CommandLog, [{
     key: "insertCommand",
@@ -223,6 +322,9 @@ var CommandLog = function () {
         return ci.time;
       });
     }
+
+    // Inserts a snapshot into the command log
+
   }, {
     key: "insertSnapshot",
     value: function insertSnapshot(snapshot) {
@@ -230,6 +332,7 @@ var CommandLog = function () {
       var index = sortInsertionFromBack(this.snapshots, snapshot, function (ss) {
         return ss.time;
       });
+
       snapshot.bucketIndices = {};
 
       // Find indices into command buckets
@@ -255,7 +358,7 @@ var CommandLog = function () {
       // Prune snapshots
       if (this.snapshots.length > this.MAX_SNAPSHOTS + this.MAX_SNAPSHOT_OVERFLOW) {
         this.snapshots.splice(0, this.snapshots.length - this.MAX_SNAPSHOTS);
-        //console.log(`Pruned snapshots, ${this.snapshots.length} remain`);
+
         var oldestSSTime = this.snapshots[0].time;
 
         // Prune commands
@@ -273,24 +376,46 @@ var CommandLog = function () {
         }
       }
     }
+
+    // Uses the command log to generate a snapshot of the object at the given time
+
+  }, {
+    key: "integrateIntoSnapshot",
+    value: function integrateIntoSnapshot(desiredTime) {
+      var snapshotIndex = searchFromBack(this.snapshots, function (ss) {
+        return ss.time < desiredTime;
+      });
+      if (snapshotIndex === undefined) return undefined;
+      var initialSnapshot = this.snapshots[snapshotIndex];
+      var bucket = this.move;
+      var bucketIndex = initialSnapshot.bucketIndices.move - this.indexOffsets.move;
+      var startTime = initialSnapshot.time;
+
+      var initialInputState = initialSnapshot.inputState;
+      var initialPhysicsState = new PhysicsState(initialInputState);
+      var initialDT = (bucket[bucketIndex] ? bucket[bucketIndex].time - startTime : desiredTime - startTime) / 1000;
+      var newWorldState = initialSnapshot.worldState.applyDeltaState(new LocalDeltaState(initialDT, initialPhysicsState));
+
+      var previousInputState = initialInputState;
+
+      for (var n = bucketIndex; n < bucket.length; n++) {
+        var endTime = bucket[n + 1] && bucket[n + 1].time < desiredTime ? bucket[n + 1].time : desiredTime;
+        var dT = (endTime - bucket[n].time) / 1000;
+        var inputState = previousInputState.applyCommandInfo(bucket[n]);
+        var physicsState = new PhysicsState(inputState);
+        newWorldState = newWorldState.applyDeltaState(new LocalDeltaState(dT, physicsState));
+        previousInputState = inputState;
+      }
+
+      return new Snapshot(newWorldState, previousInputState, desiredTime, initialSnapshot.color);
+    }
   }]);
 
   return CommandLog;
 }();
 
-// https://stackoverflow.com/questions/5026961/html5-canvas-ctx-filltext-wont-do-line-breaks/21574562#21574562
+// A running log of messages sent from a particular player
 
-
-var fillTextMultiLine = function fillTextMultiLine(ctx, text, x, y) {
-  var lineHeight = ctx.measureText("M").width * 1.2;
-  var lines = text.split("\n");
-  for (var i = lines.length - 1; i >= 0; --i) {
-    ctx.fillText(lines[i], x, y);
-    y -= lineHeight;
-  }
-};
-
-var MESSAGE_DURATION_MS = 5000;
 
 var MessageLog = function () {
   function MessageLog() {
@@ -298,6 +423,9 @@ var MessageLog = function () {
 
     this.messages = [];
   }
+
+  // Reduces the log to a newline-delimited string, pruning any messages that have expired
+
 
   _createClass(MessageLog, [{
     key: "getString",
@@ -314,6 +442,9 @@ var MessageLog = function () {
       this.messages.splice(0, pruneCount);
       return resultString;
     }
+
+    // Inserts a message into the log
+
   }, {
     key: "insertMessage",
     value: function insertMessage(message) {
@@ -326,27 +457,26 @@ var MessageLog = function () {
   return MessageLog;
 }();
 
+// ---------- Fields ---------- //
+
 var startTime = 0;
 var socket = void 0;
 var canvas = void 0;
 var context = void 0;
-var inputBox = void 0;
-var camera = void 0;
+var inputBox = void 0; // For chat input
+var camera = void 0; // We'll use separate cameras for the starfield background and the grid so we can simulate depth
 var starCamera = void 0;
 var gridCamera = void 0;
 var myCommandLog = void 0;
 var myMessageLog = new MessageLog();
 var commandLogsByAvatar = {};
 var messageLogsByAvatar = {};
-
-// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/main.js
-var stars = {
-  objs: [],
+var stars = { // Container for the starfield background objects. Populated at run-time
+  objs: [], // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/main.js
   colors: ['white', 'yellow']
 };
-
-// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/main.js
-var grid = {
+// Rendering information for the grid graphic
+var grid = { // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/main.js
   gridLines: 500, //number of grid lines
   gridSpacing: 20, //pixels per grid unit
   gridStart: [-5000, -5000], //corner anchor in world coordinates
@@ -368,14 +498,21 @@ var grid = {
     interval: 2
   }]
 };
+// The verts for the ship polygon the players are represented by
+var shipVertices = [// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/ships.js
+[-20, 17], [0, 7], [20, 17], [0, -23]];
+// Global state (eww)
+var shouldSendSnapshot = false; // When true a snapshot will be sent through the socket on the next available frame
+var commandCounter = 0; // Number of commands entered since the last snapshot was generated
+var enteringText = false; // Whether the chat input is active
 
-// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/ships.js
-var shipVertices = [[-20, 17], [0, 7], [20, 17], [0, -23]];
+// ---------- Misc ---------- //
 
+// Populates the starfield background container
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/constructors.js
 var generateStarField = function generateStarField(stars) {
-  var lower = -100000;
-  var upper = 100000;
+  var lower = -100000; // Lower x/y bound for stars
+  var upper = 100000; // Upper x/y bound for stars
   var maxRadius = 100;
   var minRadius = 50;
   for (var c = 0; c < 500; c++) {
@@ -389,27 +526,11 @@ var generateStarField = function generateStarField(stars) {
   }
 };
 
-// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/utilities.js
-var worldPointToCameraSpace = function worldPointToCameraSpace(xw, yw, camera) {
-  var cameraToPointVector = [(xw - camera.x) * camera.zoom, (yw - camera.y) * camera.zoom];
-  var rotatedVector = rotate(0, 0, cameraToPointVector[0], cameraToPointVector[1], camera.rotation);
-  return [camera.width / 2 + rotatedVector[0], camera.height / 2 + rotatedVector[1]];
-};
-
-var keyToCommand = {
-  w: commands.MOVE_FORWARD,
-  a: commands.ROTATE_CCW,
-  s: commands.MOVE_BACKWARD,
-  d: commands.ROTATE_CW
-};
-
-var COMMANDS_PER_SNAPSHOT = 10;
-var shouldSendSnapshot = false;
-var commandCounter = 0;
-var enteringText = false;
-
+// Handler for keyboard input
 var keyHandler = function keyHandler(state, e) {
+  // If the given key was a non-repeat press on Enter
   if (state === true && e.repeat === false && e.key === "Enter") {
+    // Toggle the chat input
     if (!enteringText) {
       enteringText = true;
       inputBox.value = "";
@@ -428,6 +549,8 @@ var keyHandler = function keyHandler(state, e) {
     }
     return;
   }
+
+  // If it wasn't enter, is a valid command, and isn't a repeat
   var command = keyToCommand[e.key];
   if (!enteringText && command && e.repeat === false) {
     var commandInfo = new CommandInfo(command, state);
@@ -441,35 +564,9 @@ var keyHandler = function keyHandler(state, e) {
   }
 };
 
-var integrateCommandLogIntoSnapshot = function integrateCommandLogIntoSnapshot(desiredTime, commandLog) {
-  var snapshotIndex = searchFromBack(commandLog.snapshots, function (ss) {
-    return ss.time < desiredTime;
-  });
-  if (snapshotIndex === undefined) return undefined;
-  var initialSnapshot = commandLog.snapshots[snapshotIndex];
-  var bucket = commandLog.move;
-  var bucketIndex = initialSnapshot.bucketIndices.move - commandLog.indexOffsets.move;
-  var startTime = initialSnapshot.time;
+// ---------- Drawing ---------- //
 
-  var initialInputState = initialSnapshot.inputState;
-  var initialPhysicsState = new PhysicsState(initialInputState);
-  var initialDT = (bucket[bucketIndex] ? bucket[bucketIndex].time - startTime : desiredTime - startTime) / 1000;
-  var newWorldState = initialSnapshot.worldState.applyDeltaState(new LocalDeltaState(initialDT, initialPhysicsState));
-
-  var previousInputState = initialInputState;
-
-  for (var n = bucketIndex; n < bucket.length; n++) {
-    var endTime = bucket[n + 1] && bucket[n + 1].time < desiredTime ? bucket[n + 1].time : desiredTime;
-    var dT = (endTime - bucket[n].time) / 1000;
-    var inputState = previousInputState.applyCommandInfo(bucket[n]);
-    var physicsState = new PhysicsState(inputState);
-    newWorldState = newWorldState.applyDeltaState(new LocalDeltaState(dT, physicsState));
-    previousInputState = inputState;
-  }
-
-  return new Snapshot(newWorldState, previousInputState, desiredTime, initialSnapshot.color);
-};
-
+// Renders a player avatar from the given snapshot in the given camera
 var drawAvatar = function drawAvatar(snapshot, camera) {
   var avatarPositionInCameraSpace = worldPointToCameraSpace(snapshot.worldState.x, snapshot.worldState.y, camera);
   var ctx = camera.ctx;
@@ -491,6 +588,7 @@ var drawAvatar = function drawAvatar(snapshot, camera) {
   ctx.restore();
 };
 
+// Draw a line from the snapshot's location in camera space to the snapshot's location on the grid
 var drawProjectionLines = function drawProjectionLines(snapshot, camera, gridCamera) {
   var ctx = camera.ctx;
   var positionInCameraSpace = worldPointToCameraSpace(snapshot.worldState.x, snapshot.worldState.y, camera); //get ship's position in camera space
@@ -508,6 +606,8 @@ var drawProjectionLines = function drawProjectionLines(snapshot, camera, gridCam
   ctx.restore();
 };
 
+// Draws the starfield background. A bit weirdly structured for performance reasons 
+// (rendering a couple hundred circles every frame is surprisingly expensive)
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/drawing.js
 var drawStars = function drawStars(stars, camera) {
   var start = [0, 0];
@@ -533,6 +633,7 @@ var drawStars = function drawStars(stars, camera) {
   };
 };
 
+// Draws the grid graphic. This could use some improving, but whatever
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/drawing.js
 var drawGrid = function drawGrid(grid, camera) {
   var ctx = camera.ctx;
@@ -593,6 +694,7 @@ var drawGrid = function drawGrid(grid, camera) {
   }
 };
 
+// Draws message text of the given message log at the given snapshot location in the given camera
 var drawMessages = function drawMessages(snapshot, messageLog, camera) {
   var snapshotPositionInCameraSpace = worldPointToCameraSpace(snapshot.worldState.x, snapshot.worldState.y, camera);
   var messageString = messageLog.getString(snapshot.time);
@@ -609,6 +711,7 @@ var drawMessages = function drawMessages(snapshot, messageLog, camera) {
   }
 };
 
+// Draws the tutorial text to the given camera
 var drawTutorial = function drawTutorial(camera) {
   var ctx = camera.ctx;
 
@@ -621,6 +724,8 @@ var drawTutorial = function drawTutorial(camera) {
   ctx.restore();
 };
 
+// Moves the dependent camera to the location and orientation of the main 
+// camera, but with the given Z-offset to simulate depth
 var linkCameraWithOffset = function linkCameraWithOffset(mainCamera, dependentCamera, offset) {
   dependentCamera.x = mainCamera.x;
   dependentCamera.y = mainCamera.y;
@@ -629,7 +734,8 @@ var linkCameraWithOffset = function linkCameraWithOffset(mainCamera, dependentCa
   dependentCamera.zoom = 1 / (cameraDistance + offset);
 };
 
-var drawLoop = function drawLoop() {
+// Renders a frame at the current time
+var frameLoop = function frameLoop() {
   context.fillStyle = 'black';
   context.fillRect(0, 0, canvas.width, canvas.height);
   var currentTime = Date.now();
@@ -638,7 +744,7 @@ var drawLoop = function drawLoop() {
   drawGrid(grid, gridCamera);
 
   if (myCommandLog) {
-    var snapshot = integrateCommandLogIntoSnapshot(currentTime, myCommandLog);
+    var snapshot = myCommandLog.integrateIntoSnapshot(currentTime);
     camera.x = lerp(camera.x, snapshot.worldState.x, MOVE_SPEED / 10000);
     camera.y = lerp(camera.y, snapshot.worldState.y, MOVE_SPEED / 10000);
     var rotDiff = correctOrientation(snapshot.worldState.orientation - camera.rotation);
@@ -650,7 +756,7 @@ var drawLoop = function drawLoop() {
     var integratedSnapshots = [];
     var messageLogs = [];
     for (var id in commandLogsByAvatar) {
-      integratedSnapshots.push(integrateCommandLogIntoSnapshot(currentTime, commandLogsByAvatar[id]));
+      integratedSnapshots.push(commandLogsByAvatar[id].integrateIntoSnapshot(currentTime));
       messageLogs.push(messageLogsByAvatar[id]);
     }
     drawProjectionLines(snapshot, camera, gridCamera);
@@ -675,9 +781,12 @@ var drawLoop = function drawLoop() {
     }
   }
 
-  window.requestAnimationFrame(drawLoop);
+  window.requestAnimationFrame(frameLoop);
 };
 
+// ---------- Init ---------- //
+
+// Called on window load
 var init = function init() {
   socket = io.connect();
 
@@ -698,20 +807,24 @@ var init = function init() {
 
   generateStarField(stars);
 
+  // ---------- Network protocol ---------- //
+
+  // On receiving a command from another player
   socket.on('commandInfo', function (data) {
-    //console.log(`Command ${data.command} ${data.state} from ${data.id}`);
     if (!commandLogsByAvatar[data.id]) commandLogsByAvatar[data.id] = new CommandLog();
     commandLogsByAvatar[data.id].insertCommand(data);
   });
 
+  // On receiving a snapshot from another player
   socket.on('snapshot', function (data) {
-    //console.log(`Snapshot for ${data.id} (${data.x}, ${data.y})`);
     if (!commandLogsByAvatar[data.id]) commandLogsByAvatar[data.id] = new CommandLog();
     commandLogsByAvatar[data.id].insertSnapshot(Snapshot.createFromObject(data));
   });
 
+  // On receiving initial positioning data from the server, either for us or another player
   socket.on('initial', function (data) {
     if (data.id) {
+      // If it has ID it's not ours
       shouldSendSnapshot = true; // We need to send a snapshot when a new user connects so they can start rendering us
       commandLogsByAvatar[data.id] = new CommandLog();
       commandLogsByAvatar[data.id].insertSnapshot(new Snapshot(new WorldState(data.x, data.y, data.rotation), new InputState(false, false, false, false), data.time, data.color));
@@ -722,23 +835,20 @@ var init = function init() {
     }
   });
 
+  // On receiving a chat message from another player
   socket.on('message', function (data) {
     if (!messageLogsByAvatar[data.id]) messageLogsByAvatar[data.id] = new MessageLog();
     data.time = Date.now();
     messageLogsByAvatar[data.id].insertMessage(data);
   });
 
+  // On another player disconnecting
   socket.on('terminate', function (data) {
     delete commandLogsByAvatar[data.id];
     delete messageLogsByAvatar[data.id];
   });
 
-  var clearObject = function clearObject(obj) {
-    Object.keys(obj).forEach(function (k) {
-      return delete obj[k];
-    });
-  };
-
+  // On us disconnecting
   socket.on('disconnect', function () {
     clearObject(commandLogsByAvatar);
     clearObject(messageLogsByAvatar);
@@ -747,7 +857,7 @@ var init = function init() {
   window.addEventListener('keydown', keyHandler.bind(null, true));
   window.addEventListener('keyup', keyHandler.bind(null, false));
 
-  window.requestAnimationFrame(drawLoop);
+  window.requestAnimationFrame(frameLoop);
 };
 
 window.onload = init;
