@@ -12,8 +12,7 @@ var commandsByType = {
     MOVE_RIGHT: "MOVE_RIGHT",
     ROTATE_CW: "ROTATE_CW",
     ROTATE_CCW: "ROTATE_CCW"
-  },
-  oneShot: {}
+  }
 };
 
 var commands = {};
@@ -26,14 +25,25 @@ for (var type in commandsByType) {
 }
 
 var sortInsertionFromBack = function sortInsertionFromBack(arr, newItem, valueFunc) {
-  if (arr.length === 0) arr.push(newItem);
-  for (var n = arr.length - 1; n >= 0; n++) {
+  if (arr.length === 0) {
+    arr.push(newItem);
+    return 0;
+  }
+  for (var n = arr.length - 1; n >= 0; n--) {
     if (valueFunc(newItem) >= valueFunc(arr[n])) {
       arr.splice(n + 1, 0, newItem);
-      return;
+      return n + 1;
     }
   }
   arr.splice(0, 0, newItem);
+  return 0;
+};
+
+var searchFromBack = function searchFromBack(arr, evalFunc) {
+  for (var n = arr.length - 1; n >= 0; n--) {
+    if (evalFunc(arr[n])) return n;
+  }
+  return undefined;
 };
 
 var CommandInfo = function CommandInfo(command, state) {
@@ -130,21 +140,96 @@ var WorldState = function () {
   return WorldState;
 }();
 
+var Snapshot = function () {
+  function Snapshot(worldState, inputState, time, color) {
+    _classCallCheck(this, Snapshot);
+
+    this.worldState = worldState;
+    this.inputState = inputState;
+    this.time = time;
+    this.color = color;
+  }
+
+  _createClass(Snapshot, null, [{
+    key: "createFromObject",
+    value: function createFromObject(ssObject) {
+      return new Snapshot(Object.assign(Object.create(WorldState.prototype), ssObject.worldState), Object.assign(Object.create(InputState.prototype), ssObject.inputState), ssObject.time, ssObject.color);
+    }
+  }]);
+
+  return Snapshot;
+}();
+
 var CommandLog = function () {
   function CommandLog() {
     _classCallCheck(this, CommandLog);
 
+    this.snapshots = [];
+    this.indexOffsets = {};
+    this.MAX_SNAPSHOTS = 20;
+    this.MAX_SNAPSHOT_OVERFLOW = 5;
     for (var _type in commandsByType) {
       this[_type] = [];
+      this.indexOffsets[_type] = 0;
     }
   }
 
   _createClass(CommandLog, [{
-    key: "insert",
-    value: function insert(commandInfo) {
+    key: "insertCommand",
+    value: function insertCommand(commandInfo) {
       sortInsertionFromBack(this[commandInfo.type], commandInfo, function (ci) {
         return ci.time;
       });
+    }
+  }, {
+    key: "insertSnapshot",
+    value: function insertSnapshot(snapshot) {
+      // Insert from back
+      var index = sortInsertionFromBack(this.snapshots, snapshot, function (ss) {
+        return ss.time;
+      });
+      snapshot.bucketIndices = {};
+
+      // Find indices into command buckets
+      if (index === 0) {
+        // For the first snapshot
+        for (var _type2 in commandsByType) {
+          snapshot.bucketIndices[_type2] = 0;
+        }
+      } else {
+        // For subsequent snapshots
+        var previousSnapshot = this.snapshots[index - 1];
+        for (var _type3 in previousSnapshot.bucketIndices) {
+          var n = previousSnapshot.bucketIndices[_type3];
+
+          // Find index of first command younger than the snapshot
+          for (; n - this.indexOffsets[_type3] < this[_type3].length && this[_type3][n - this.indexOffsets[_type3]].time < snapshot.time; n++) {}
+
+          // That index will be the first one we use when integrating
+          snapshot.bucketIndices[_type3] = n;
+        }
+      }
+
+      // Prune snapshots
+      if (this.snapshots.length > this.MAX_SNAPSHOTS + this.MAX_SNAPSHOT_OVERFLOW) {
+        this.snapshots.splice(0, this.snapshots.length - this.MAX_SNAPSHOTS);
+        //console.log(`Pruned snapshots, ${this.snapshots.length} remain`);
+        var oldestSSTime = this.snapshots[0].time;
+
+        // Prune commands
+        for (var _type4 in commandsByType) {
+          var _n = 0;
+
+          // Find index of first command younger than the oldest snapshot
+          for (; _n < this[_type4].length && this[_type4][_n].time < oldestSSTime; _n++) {}
+
+          // Remove all commands before that one
+          this[_type4].splice(0, _n);
+          //console.log(`Pruned ${n} commands of type ${type}, ${this[type].length} remain`);
+
+          this.indexOffsets[_type4] += _n;
+        }
+      }
     }
   }]);
 
@@ -155,10 +240,7 @@ var socket = void 0;
 var canvas = void 0;
 var context = void 0;
 var camera = void 0;
-var myAvatarSnapshot = void 0;
-var snapshotSendInterval = void 0;
-var myCommandLog = new CommandLog();
-var otherAvatarSnapshots = {};
+var myCommandLog = void 0;
 var commandLogsByAvatar = {};
 
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/utilities.js
@@ -175,27 +257,41 @@ var keyToCommand = {
   d: commands.ROTATE_CW
 };
 
+var COMMANDS_PER_SNAPSHOT = 10;
+var shouldSendSnapshot = false;
+var commandCounter = 0;
 var keyHandler = function keyHandler(state, e) {
-  console.log('input registered');
   var command = keyToCommand[e.key];
   if (command && e.repeat == false) {
     var commandInfo = new CommandInfo(command, state);
-    myCommandLog.insert(commandInfo);
-    console.log("valid command " + command);
+    myCommandLog.insertCommand(commandInfo);
     socket.emit('commandInfo', commandInfo);
+    commandCounter++;
+    if (commandCounter >= COMMANDS_PER_SNAPSHOT) {
+      commandCounter = 0;
+      shouldSendSnapshot = true;
+    }
   }
 };
 
-// Assumes bucket doesn't contain any commands dated before startTime
-var integrateMoveCommandBucketIntoLocalDelta = function integrateMoveCommandBucketIntoLocalDelta(startTime, currentTime, bucket, worldState) {
-  var initialInputState = new InputState(false, false, false, false);
+var integrateCommandLogIntoSnapshot = function integrateCommandLogIntoSnapshot(currentTime, commandLog) {
+  var snapshotIndex = searchFromBack(commandLog.snapshots, function (ss) {
+    return ss.time < currentTime;
+  });
+  if (snapshotIndex === undefined) return undefined;
+  var initialSnapshot = commandLog.snapshots[snapshotIndex];
+  var bucket = commandLog.move;
+  var bucketIndex = initialSnapshot.bucketIndices.move - commandLog.indexOffsets.move;
+  var startTime = initialSnapshot.time;
+
+  var initialInputState = initialSnapshot.inputState;
   var initialPhysicsState = new PhysicsState(initialInputState);
-  var initialDT = (bucket.length ? bucket[0].time - startTime : currentTime - startTime) / 1000;
-  var newWorldState = worldState.applyDeltaState(new LocalDeltaState(initialDT, initialPhysicsState));
+  var initialDT = (bucket[bucketIndex] ? bucket[bucketIndex].time - startTime : currentTime - startTime) / 1000;
+  var newWorldState = initialSnapshot.worldState.applyDeltaState(new LocalDeltaState(initialDT, initialPhysicsState));
 
   var previousInputState = initialInputState;
 
-  for (var n = 0; n < bucket.length; n++) {
+  for (var n = bucketIndex; n < bucket.length; n++) {
     var endTime = bucket[n + 1] && bucket[n + 1].time < currentTime ? bucket[n + 1].time : currentTime;
     var dT = (endTime - bucket[n].time) / 1000;
     var inputState = previousInputState.applyCommandInfo(bucket[n]);
@@ -204,65 +300,43 @@ var integrateMoveCommandBucketIntoLocalDelta = function integrateMoveCommandBuck
     previousInputState = inputState;
   }
 
-  return newWorldState;
+  return new Snapshot(newWorldState, previousInputState, currentTime, initialSnapshot.color);
 };
 
-var integrateAvatar = function integrateAvatar(snapshot, commandLog) {
-  var currentTime = Date.now();
-
-  var initialWorldState = new WorldState(snapshot.x, snapshot.y, snapshot.rotation);
-
-  var newWorldState = integrateMoveCommandBucketIntoLocalDelta(snapshot.time, currentTime, commandLog.move, initialWorldState);
-
-  return { x: newWorldState.x, y: newWorldState.y, rotation: newWorldState.orientation, color: snapshot.color };
-};
-
-var drawAvatar = function drawAvatar(avatar, camera) {
-  var avatarPositionInCameraSpace = worldPointToCameraSpace(avatar.x, avatar.y, camera);
+var drawAvatar = function drawAvatar(snapshot, camera) {
+  var avatarPositionInCameraSpace = worldPointToCameraSpace(snapshot.worldState.x, snapshot.worldState.y, camera);
   var ctx = camera.ctx;
 
   ctx.save();
   ctx.translate(avatarPositionInCameraSpace[0], avatarPositionInCameraSpace[1]);
-  ctx.rotate((avatar.rotation - camera.rotation) * (Math.PI / 180));
+  ctx.rotate((snapshot.worldState.orientation - camera.rotation) * (Math.PI / 180));
   ctx.scale(camera.zoom, camera.zoom);
-  ctx.fillStyle = avatar.color;
+  ctx.fillStyle = snapshot.color;
   ctx.fillRect(-20, -20, 40, 40);
   ctx.restore();
 };
 
 var drawLoop = function drawLoop() {
   context.clearRect(0, 0, canvas.width, canvas.height);
-  if (myAvatarSnapshot) {
-    var myAvatar = integrateAvatar(myAvatarSnapshot, myCommandLog);
-    camera.x = myAvatar.x;
-    camera.y = myAvatar.y;
-    camera.rotation = myAvatar.rotation;
+  var currentTime = Date.now();
+  if (myCommandLog) {
+    var snapshot = integrateCommandLogIntoSnapshot(currentTime, myCommandLog);
+    camera.x = snapshot.worldState.x;
+    camera.y = snapshot.worldState.y;
+    camera.rotation = snapshot.worldState.orientation;
 
-    for (var id in otherAvatarSnapshots) {
-      drawAvatar(integrateAvatar(otherAvatarSnapshots[id], commandLogsByAvatar[id]), camera);
+    for (var id in commandLogsByAvatar) {
+      drawAvatar(integrateCommandLogIntoSnapshot(currentTime, commandLogsByAvatar[id]), camera);
     }
-    drawAvatar(myAvatar, camera);
+    drawAvatar(snapshot, camera);
+    if (shouldSendSnapshot) {
+      myCommandLog.insertSnapshot(snapshot);
+      socket.emit('snapshot', snapshot);
+      shouldSendSnapshot = false;
+    }
   }
 
   window.requestAnimationFrame(drawLoop);
-};
-
-var receiveSnapshot = function receiveSnapshot(data) {
-  // Someone else's
-  if (data.id) {
-    console.log("Snapshot for " + data.id + " (" + data.x + ", " + data.y + ")");
-    otherAvatarSnapshots[data.id] = data;
-    if (!commandLogsByAvatar[data.id]) commandLogsByAvatar[data.id] = new CommandLog();
-  }
-  // Ours
-  else {
-      console.log("our snapshot (" + data.x + ", " + data.y + ")");
-      myAvatarSnapshot = data;
-
-      snapshotSendInterval = setInterval(function () {
-        socket.emit('snapshot', myAvatarSnapshot);
-      }, 3000);
-    }
 };
 
 var init = function init() {
@@ -287,19 +361,31 @@ var init = function init() {
   };
 
   socket.on('commandInfo', function (data) {
-    console.log("Command " + data.command + " " + data.state + " from " + data.id);
+    //console.log(`Command ${data.command} ${data.state} from ${data.id}`);
     if (!commandLogsByAvatar[data.id]) commandLogsByAvatar[data.id] = new CommandLog();
-    commandLogsByAvatar[data.id].insert(data);
+    commandLogsByAvatar[data.id].insertCommand(data);
   });
 
-  socket.on('snapshot', receiveSnapshot);
+  socket.on('snapshot', function (data) {
+    //console.log(`Snapshot for ${data.id} (${data.x}, ${data.y})`);
+    if (!commandLogsByAvatar[data.id]) commandLogsByAvatar[data.id] = new CommandLog();
+    commandLogsByAvatar[data.id].insertSnapshot(Snapshot.createFromObject(data));
+  });
+
   socket.on('initial', function (data) {
-    myCommandLog = new CommandLog();
-    receiveSnapshot(data);
+    if (data.id) {
+      shouldSendSnapshot = true; // We need to send a snapshot when a new user connects so they can start rendering us
+      commandLogsByAvatar[data.id] = new CommandLog();
+      commandLogsByAvatar[data.id].insertSnapshot(new Snapshot(new WorldState(data.x, data.y, data.rotation), new InputState(false, false, false, false), data.time, data.color));
+    } else {
+      myCommandLog = new CommandLog();
+
+      //console.log(`our initial (${data.x}, ${data.y})`);
+      myCommandLog.insertSnapshot(new Snapshot(new WorldState(data.x, data.y, data.rotation), new InputState(false, false, false, false), data.time, data.color));
+    }
   });
 
   socket.on('terminate', function (data) {
-    delete otherAvatarSnapshots[data.id];
     delete commandLogsByAvatar[data.id];
   });
 
@@ -310,9 +396,7 @@ var init = function init() {
   };
 
   socket.on('disconnect', function () {
-    clearObject(otherAvatarSnapshots);
     clearObject(commandLogsByAvatar);
-    if (snapshotSendInterval) clearInterval(snapshotSendInterval);
   });
 
   socket.on('connect', function () {});

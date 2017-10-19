@@ -6,8 +6,7 @@ const commandsByType = {
     MOVE_RIGHT: "MOVE_RIGHT",
     ROTATE_CW: "ROTATE_CW",
     ROTATE_CCW: "ROTATE_CCW"
-  },
-  oneShot: {}  
+  } 
 };
 
 const commands = {};
@@ -20,15 +19,26 @@ for(const type in commandsByType){
 }
 
 const sortInsertionFromBack = (arr, newItem, valueFunc) => {
-  if(arr.length === 0)
+  if(arr.length === 0) {
     arr.push(newItem);
-  for(let n = arr.length - 1; n>=0; n++){
+    return 0;
+  }
+  for(let n = arr.length - 1; n>=0; n--){
     if(valueFunc(newItem) >= valueFunc(arr[n])){
       arr.splice(n + 1, 0, newItem);
-      return;
+      return n + 1;
     }
   }
   arr.splice(0, 0, newItem);
+  return 0;
+};
+
+const searchFromBack = (arr, evalFunc) => {
+  for(let n = arr.length - 1; n >= 0; n--) {
+    if(evalFunc(arr[n]))
+      return n;
+  }
+  return undefined;
 };
 
 class CommandInfo {
@@ -111,15 +121,83 @@ class WorldState {
   }
 }
 
+class Snapshot {
+  constructor(worldState, inputState, time, color) {
+    this.worldState = worldState;
+    this.inputState = inputState;
+    this.time = time;
+    this.color = color;
+  }
+
+  static createFromObject(ssObject) {
+    return new Snapshot(
+      Object.assign(Object.create(WorldState.prototype), ssObject.worldState), 
+      Object.assign(Object.create(InputState.prototype), ssObject.inputState), 
+      ssObject.time, 
+      ssObject.color
+    );
+  }
+}
+
 class CommandLog {
   constructor() {
+    this.snapshots = [];
+    this.indexOffsets = {};
+    this.MAX_SNAPSHOTS = 20;
+    this.MAX_SNAPSHOT_OVERFLOW = 5;
     for(const type in commandsByType){
       this[type] = [];
+      this.indexOffsets[type] = 0;
     }
   }
 
-  insert(commandInfo){
+  insertCommand(commandInfo){
     sortInsertionFromBack(this[commandInfo.type], commandInfo, (ci) => ci.time);
+  }
+
+  insertSnapshot(snapshot) {
+    // Insert from back
+    const index = sortInsertionFromBack(this.snapshots, snapshot, (ss) => ss.time);
+    snapshot.bucketIndices = {};
+
+    // Find indices into command buckets
+    if(index === 0) { // For the first snapshot
+      for(const type in commandsByType)
+        snapshot.bucketIndices[type] = 0;
+    }
+    else { // For subsequent snapshots
+      const previousSnapshot = this.snapshots[index - 1];
+      for(const type in previousSnapshot.bucketIndices) {
+        let n = previousSnapshot.bucketIndices[type];
+
+        // Find index of first command younger than the snapshot
+        for(; n - this.indexOffsets[type] < this[type].length && this[type][n - this.indexOffsets[type]].time < snapshot.time; n++) ;
+
+        // That index will be the first one we use when integrating
+        snapshot.bucketIndices[type] = n;
+      }
+    }
+
+    // Prune snapshots
+    if(this.snapshots.length > this.MAX_SNAPSHOTS + this.MAX_SNAPSHOT_OVERFLOW) {
+      this.snapshots.splice(0, this.snapshots.length - this.MAX_SNAPSHOTS);
+      //console.log(`Pruned snapshots, ${this.snapshots.length} remain`);
+      const oldestSSTime = this.snapshots[0].time;
+
+      // Prune commands
+      for(const type in commandsByType) {
+        let n = 0;
+
+        // Find index of first command younger than the oldest snapshot
+        for(; n < this[type].length && this[type][n].time < oldestSSTime; n++) ;
+
+        // Remove all commands before that one
+        this[type].splice(0, n);
+        //console.log(`Pruned ${n} commands of type ${type}, ${this[type].length} remain`);
+
+        this.indexOffsets[type] += n;
+      }
+    }
   }
 }
 
@@ -127,10 +205,7 @@ let socket;
 let canvas;
 let context;
 let camera;
-let myAvatarSnapshot;
-let snapshotSendInterval;
-let myCommandLog = new CommandLog();
-const otherAvatarSnapshots = {};
+let myCommandLog;
 const commandLogsByAvatar = {};
 
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/utilities.js
@@ -147,27 +222,40 @@ const keyToCommand = {
   d: commands.ROTATE_CW
 };
 
+const COMMANDS_PER_SNAPSHOT = 10;
+let shouldSendSnapshot = false;
+let commandCounter = 0;
 const keyHandler = (state, e) => {
-  console.log('input registered');
   const command = keyToCommand[e.key];
   if(command && e.repeat == false) {
     const commandInfo = new CommandInfo(command, state)
-    myCommandLog.insert(commandInfo);
-    console.log(`valid command ${command}`);
+    myCommandLog.insertCommand(commandInfo);
     socket.emit('commandInfo', commandInfo);
+    commandCounter++;
+    if(commandCounter >= COMMANDS_PER_SNAPSHOT) {
+      commandCounter = 0;
+      shouldSendSnapshot = true;
+    }
   }
 };
 
-// Assumes bucket doesn't contain any commands dated before startTime
-const integrateMoveCommandBucketIntoLocalDelta = (startTime, currentTime, bucket, worldState) => {
-  const initialInputState = new InputState(false, false, false, false);
+const integrateCommandLogIntoSnapshot = (currentTime, commandLog) => {
+  const snapshotIndex = searchFromBack(commandLog.snapshots, (ss) => ss.time < currentTime);
+  if(snapshotIndex === undefined)
+    return undefined;
+  const initialSnapshot = commandLog.snapshots[snapshotIndex];
+  const bucket = commandLog.move;
+  const bucketIndex = initialSnapshot.bucketIndices.move - commandLog.indexOffsets.move;
+  const startTime = initialSnapshot.time;
+
+  const initialInputState = initialSnapshot.inputState;
   const initialPhysicsState = new PhysicsState(initialInputState);
-  const initialDT = ((bucket.length) ? bucket[0].time - startTime : currentTime - startTime) / 1000;
-  let newWorldState = worldState.applyDeltaState(new LocalDeltaState(initialDT, initialPhysicsState));
+  const initialDT = ((bucket[bucketIndex]) ? bucket[bucketIndex].time - startTime : currentTime - startTime) / 1000;
+  let newWorldState = initialSnapshot.worldState.applyDeltaState(new LocalDeltaState(initialDT, initialPhysicsState));
 
   let previousInputState = initialInputState;
 
-  for(let n = 0; n < bucket.length; n++) {
+  for(let n = bucketIndex; n < bucket.length; n++) {
     const endTime = (bucket[n + 1] && bucket[n + 1].time < currentTime) ? bucket[n + 1].time : currentTime;
     const dT = (endTime - bucket[n].time) / 1000;
     const inputState = previousInputState.applyCommandInfo(bucket[n]);
@@ -176,64 +264,43 @@ const integrateMoveCommandBucketIntoLocalDelta = (startTime, currentTime, bucket
     previousInputState = inputState;
   }
 
-  return newWorldState;
+  return new Snapshot(newWorldState, previousInputState, currentTime, initialSnapshot.color);
 }
 
-const integrateAvatar = (snapshot, commandLog) => {
-  const currentTime = Date.now();
-
-  const initialWorldState = new WorldState(snapshot.x, snapshot.y, snapshot.rotation);
-
-  const newWorldState = integrateMoveCommandBucketIntoLocalDelta(snapshot.time, currentTime, commandLog.move, initialWorldState);
-
-  return { x: newWorldState.x, y: newWorldState.y, rotation: newWorldState.orientation, color: snapshot.color };
-};
-
-const drawAvatar = (avatar, camera) => {
-  const avatarPositionInCameraSpace = worldPointToCameraSpace(avatar.x, avatar.y, camera);
+const drawAvatar = (snapshot, camera) => {
+  const avatarPositionInCameraSpace = worldPointToCameraSpace(snapshot.worldState.x, snapshot.worldState.y, camera);
   const ctx = camera.ctx;
 
   ctx.save();
   ctx.translate(avatarPositionInCameraSpace[0], avatarPositionInCameraSpace[1]);
-  ctx.rotate((avatar.rotation - camera.rotation) * (Math.PI / 180));
+  ctx.rotate((snapshot.worldState.orientation - camera.rotation) * (Math.PI / 180));
   ctx.scale(camera.zoom, camera.zoom);
-  ctx.fillStyle = avatar.color;
+  ctx.fillStyle = snapshot.color;
   ctx.fillRect(-20,-20,40,40);
   ctx.restore();
 };
 
 const drawLoop = () => {
   context.clearRect(0, 0, canvas.width, canvas.height);
-  if(myAvatarSnapshot){
-    const myAvatar = integrateAvatar(myAvatarSnapshot, myCommandLog);
-    camera.x = myAvatar.x;
-    camera.y = myAvatar.y;
-    camera.rotation = myAvatar.rotation;
+  const currentTime = Date.now();
+  if(myCommandLog){
+    const snapshot = integrateCommandLogIntoSnapshot(currentTime, myCommandLog);
+    camera.x = snapshot.worldState.x;
+    camera.y = snapshot.worldState.y;
+    camera.rotation = snapshot.worldState.orientation;
 
-    for(const id in otherAvatarSnapshots){
-      drawAvatar(integrateAvatar(otherAvatarSnapshots[id], commandLogsByAvatar[id]), camera);
+    for(const id in commandLogsByAvatar){
+      drawAvatar(integrateCommandLogIntoSnapshot(currentTime, commandLogsByAvatar[id]), camera);
     }
-    drawAvatar(myAvatar, camera);
+    drawAvatar(snapshot, camera);
+    if(shouldSendSnapshot) {
+      myCommandLog.insertSnapshot(snapshot);
+      socket.emit('snapshot', snapshot);
+      shouldSendSnapshot = false;
+    }
   }
 
   window.requestAnimationFrame(drawLoop);
-};
-
-const receiveSnapshot = (data) => {
-  // Someone else's
-  if(data.id) {
-    console.log(`Snapshot for ${data.id} (${data.x}, ${data.y})`);
-    otherAvatarSnapshots[data.id] = data;
-    if(!commandLogsByAvatar[data.id])
-      commandLogsByAvatar[data.id] = new CommandLog();
-  }
-  // Ours
-  else {
-    console.log(`our snapshot (${data.x}, ${data.y})`);
-    myAvatarSnapshot = data;
-
-    snapshotSendInterval = setInterval(() => {socket.emit('snapshot', myAvatarSnapshot)}, 3000);
-  }
 };
 
 const init = () => {
@@ -258,20 +325,34 @@ const init = () => {
   };
 
   socket.on('commandInfo', (data) => {
-    console.log(`Command ${data.command} ${data.state} from ${data.id}`);
+    //console.log(`Command ${data.command} ${data.state} from ${data.id}`);
     if(!commandLogsByAvatar[data.id])
       commandLogsByAvatar[data.id] = new CommandLog();
-    commandLogsByAvatar[data.id].insert(data);
+    commandLogsByAvatar[data.id].insertCommand(data);
   });
 
-  socket.on('snapshot', receiveSnapshot);
+  socket.on('snapshot', (data) => {
+    //console.log(`Snapshot for ${data.id} (${data.x}, ${data.y})`);
+    if(!commandLogsByAvatar[data.id])
+      commandLogsByAvatar[data.id] = new CommandLog();
+    commandLogsByAvatar[data.id].insertSnapshot(Snapshot.createFromObject(data));
+  });
+
   socket.on('initial', (data) => {
-    myCommandLog = new CommandLog();
-    receiveSnapshot(data);
+    if(data.id){
+      shouldSendSnapshot = true; // We need to send a snapshot when a new user connects so they can start rendering us
+      commandLogsByAvatar[data.id] = new CommandLog();
+      commandLogsByAvatar[data.id].insertSnapshot(new Snapshot(new WorldState(data.x, data.y, data.rotation), new InputState(false, false, false, false), data.time, data.color));
+    }
+    else {
+      myCommandLog = new CommandLog();
+
+      //console.log(`our initial (${data.x}, ${data.y})`);
+      myCommandLog.insertSnapshot(new Snapshot(new WorldState(data.x, data.y, data.rotation), new InputState(false, false, false, false), data.time, data.color));
+    }
   });
 
   socket.on('terminate', (data) => {
-    delete otherAvatarSnapshots[data.id];
     delete commandLogsByAvatar[data.id];
   });
 
@@ -280,10 +361,7 @@ const init = () => {
   };
 
   socket.on('disconnect', () => {
-    clearObject(otherAvatarSnapshots);
     clearObject(commandLogsByAvatar);
-    if(snapshotSendInterval)
-      clearInterval(snapshotSendInterval);
   });
 
   socket.on('connect', () => {

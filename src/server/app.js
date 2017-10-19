@@ -36,7 +36,7 @@ io.on('connection', (socket) => {
 
   socket.emit('initial', initialSnapshot);
   initialSnapshot.id = socket.id;
-  socket.broadcast.emit('snapshot', initialSnapshot);
+  socket.broadcast.emit('initial', initialSnapshot);
 
   socket.on('commandInfo', (data) => {
     const dataCopy = data;
