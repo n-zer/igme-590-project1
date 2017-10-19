@@ -21,11 +21,21 @@ const onRequest = (request, response) => {
 
 const app = http.createServer(onRequest).listen(port);
 
-console.log(`Listening on port ${port}`);
+const roomCounts = [0];
+const MAX_ROOM_SIZE = 15;
+
+console.log(`Listening on port ${port}, maximum room size is ${MAX_ROOM_SIZE}`);
 
 const io = socketio(app);
 
 io.on('connection', (socket) => {
+  let roomNumber = 0;
+  while(roomCounts[roomNumber] >= MAX_ROOM_SIZE) roomNumber++;
+  const roomString = `room${roomNumber}`;
+  roomCounts[roomNumber]++;
+
+  socket.join(roomString);
+
   const initialSnapshot = {
     time: Date.now(),
     x: utilities.getRandomInt(0, 200),
@@ -36,21 +46,23 @@ io.on('connection', (socket) => {
 
   socket.emit('initial', initialSnapshot);
   initialSnapshot.id = socket.id;
-  socket.broadcast.emit('initial', initialSnapshot);
+  socket.broadcast.to(roomString).emit('initial', initialSnapshot);
 
   socket.on('commandInfo', (data) => {
     const dataCopy = data;
     dataCopy.id = socket.id;
-    socket.broadcast.emit('commandInfo', dataCopy);
+    socket.broadcast.to(roomString).emit('commandInfo', dataCopy);
   });
 
   socket.on('snapshot', (data) => {
     const dataCopy = data;
     dataCopy.id = socket.id;
-    socket.broadcast.emit('snapshot', dataCopy);
+    socket.broadcast.to(roomString).emit('snapshot', dataCopy);
   });
 
   socket.on('disconnect', () => {
-    socket.broadcast.emit('terminate', { id: socket.id, time: Date.now() });
+    socket.broadcast.to(roomString).emit('terminate', { id: socket.id, time: Date.now() });
+    socket.leave(roomString);
+    roomCounts[roomNumber]--;
   });
 });

@@ -240,8 +240,60 @@ var socket = void 0;
 var canvas = void 0;
 var context = void 0;
 var camera = void 0;
+var starCamera = void 0;
+var gridCamera = void 0;
 var myCommandLog = void 0;
 var commandLogsByAvatar = {};
+
+// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/main.js
+var stars = {
+  objs: [],
+  colors: ['white', 'yellow']
+};
+
+// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/main.js
+var grid = {
+  gridLines: 500, //number of grid lines
+  gridSpacing: 20, //pixels per grid unit
+  gridStart: [-5000, -5000], //corner anchor in world coordinates
+  colors: [{
+    color: '#1111FF',
+    interval: 1000
+  }, {
+    color: 'blue',
+    interval: 200
+  }, {
+    color: 'mediumblue',
+    interval: 50,
+    minimap: true
+  }, {
+    color: 'darkblue',
+    interval: 10
+  }, {
+    color: 'navyblue',
+    interval: 2
+  }]
+};
+
+// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/ships.js
+var shipVertices = [[-20, 17], [0, 7], [20, 17], [0, -23]];
+
+// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/constructors.js
+var generateStarField = function generateStarField(stars) {
+  var lower = -50000;
+  var upper = 50000;
+  var maxRadius = 100;
+  var minRadius = 50;
+  for (var c = 0; c < 500; c++) {
+    var group = Math.floor(Math.random() * stars.colors.length);
+    stars.objs.push({
+      x: Math.random() * (upper - lower) + lower,
+      y: Math.random() * (upper - lower) + lower,
+      radius: Math.random() * (maxRadius - minRadius) + minRadius,
+      colorIndex: group
+    });
+  }
+};
 
 // From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/utilities.js
 var worldPointToCameraSpace = function worldPointToCameraSpace(xw, yw, camera) {
@@ -274,9 +326,9 @@ var keyHandler = function keyHandler(state, e) {
   }
 };
 
-var integrateCommandLogIntoSnapshot = function integrateCommandLogIntoSnapshot(currentTime, commandLog) {
+var integrateCommandLogIntoSnapshot = function integrateCommandLogIntoSnapshot(desiredTime, commandLog) {
   var snapshotIndex = searchFromBack(commandLog.snapshots, function (ss) {
-    return ss.time < currentTime;
+    return ss.time < desiredTime;
   });
   if (snapshotIndex === undefined) return undefined;
   var initialSnapshot = commandLog.snapshots[snapshotIndex];
@@ -286,13 +338,13 @@ var integrateCommandLogIntoSnapshot = function integrateCommandLogIntoSnapshot(c
 
   var initialInputState = initialSnapshot.inputState;
   var initialPhysicsState = new PhysicsState(initialInputState);
-  var initialDT = (bucket[bucketIndex] ? bucket[bucketIndex].time - startTime : currentTime - startTime) / 1000;
+  var initialDT = (bucket[bucketIndex] ? bucket[bucketIndex].time - startTime : desiredTime - startTime) / 1000;
   var newWorldState = initialSnapshot.worldState.applyDeltaState(new LocalDeltaState(initialDT, initialPhysicsState));
 
   var previousInputState = initialInputState;
 
   for (var n = bucketIndex; n < bucket.length; n++) {
-    var endTime = bucket[n + 1] && bucket[n + 1].time < currentTime ? bucket[n + 1].time : currentTime;
+    var endTime = bucket[n + 1] && bucket[n + 1].time < desiredTime ? bucket[n + 1].time : desiredTime;
     var dT = (endTime - bucket[n].time) / 1000;
     var inputState = previousInputState.applyCommandInfo(bucket[n]);
     var physicsState = new PhysicsState(inputState);
@@ -300,7 +352,7 @@ var integrateCommandLogIntoSnapshot = function integrateCommandLogIntoSnapshot(c
     previousInputState = inputState;
   }
 
-  return new Snapshot(newWorldState, previousInputState, currentTime, initialSnapshot.color);
+  return new Snapshot(newWorldState, previousInputState, desiredTime, initialSnapshot.color);
 };
 
 var drawAvatar = function drawAvatar(snapshot, camera) {
@@ -311,22 +363,152 @@ var drawAvatar = function drawAvatar(snapshot, camera) {
   ctx.translate(avatarPositionInCameraSpace[0], avatarPositionInCameraSpace[1]);
   ctx.rotate((snapshot.worldState.orientation - camera.rotation) * (Math.PI / 180));
   ctx.scale(camera.zoom, camera.zoom);
+
+  ctx.beginPath();
+  ctx.moveTo(shipVertices[0][0], shipVertices[0][1]);
+  for (var c = 1; c < shipVertices.length; c++) {
+    var vert = shipVertices[c];
+    ctx.lineTo(vert[0], vert[1]);
+  }
+  ctx.closePath();
   ctx.fillStyle = snapshot.color;
-  ctx.fillRect(-20, -20, 40, 40);
+  ctx.fill();
   ctx.restore();
 };
 
+var drawProjectionLines = function drawProjectionLines(snapshot, camera, gridCamera) {
+  var ctx = camera.ctx;
+  var positionInCameraSpace = worldPointToCameraSpace(snapshot.worldState.x, snapshot.worldState.y, camera); //get ship's position in camera space
+  var positionInGridCameraSpace = worldPointToCameraSpace(snapshot.worldState.x, snapshot.worldState.y, gridCamera);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(positionInCameraSpace[0], positionInCameraSpace[1]);
+  ctx.lineTo(positionInGridCameraSpace[0], positionInGridCameraSpace[1]);
+  ctx.arc(positionInGridCameraSpace[0], positionInGridCameraSpace[1], 15 * gridCamera.zoom, 0, Math.PI * 2);
+  ctx.strokeStyle = 'grey';
+  ctx.lineWidth = .5;
+  ctx.globalAlpha = .5;
+  ctx.stroke();
+  ctx.restore();
+};
+
+// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/drawing.js
+var drawStars = function drawStars(stars, camera) {
+  var start = [0, 0];
+  var end = [camera.width, camera.height];
+  var ctx = camera.ctx;
+  for (var group = 0; group < stars.colors.length; group++) {
+    ctx.save();
+    ctx.fillStyle = stars.colors[group];
+    ctx.beginPath();
+    for (var c = 0; c < stars.objs.length; c++) {
+      var star = stars.objs[c];
+      if (star.colorIndex != group) continue;
+
+      var finalPosition = worldPointToCameraSpace(star.x, star.y, camera); //get star's position in camera space
+
+      if (finalPosition[0] + star.radius * camera.zoom < start[0] || finalPosition[0] - star.radius * camera.zoom > end[0] || finalPosition[1] + star.radius * camera.zoom < start[1] || finalPosition[1] - star.radius * camera.zoom > end[1]) continue;
+      ctx.moveTo(finalPosition[0], finalPosition[1]);
+      ctx.arc(finalPosition[0], finalPosition[1], star.radius * camera.zoom, 0, Math.PI * 2);
+    };
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  };
+};
+
+// From an old project of mine - https://github.com/narrill/Space-Battle/blob/master/js/drawing.js
+var drawGrid = function drawGrid(grid, camera) {
+  var ctx = camera.ctx;
+  var gridLines = grid.gridLines;
+  var gridSpacing = grid.gridSpacing;
+  var gridStart = grid.gridStart;
+
+  for (var c = 0; c < grid.colors.length; c++) {
+    ctx.save();
+    ctx.beginPath();
+    for (var x = 0; x <= gridLines; x++) {
+      if (x % grid.colors[c].interval != 0) continue;
+      var correctInterval = true;
+      for (var n = 0; n < c; n++) {
+        if (x % grid.colors[n].interval == 0) {
+          correctInterval = false;
+          break;
+        }
+      }
+      if (correctInterval != true) continue;
+      //define start and end points for current line in world space
+      var start = [gridStart[0] + x * gridSpacing, gridStart[1]];
+      var end = [start[0], gridStart[1] + gridLines * gridSpacing];
+      //convert to camera space
+      start = worldPointToCameraSpace(start[0], start[1], camera);
+      end = worldPointToCameraSpace(end[0], end[1], camera);
+      ctx.moveTo(start[0], start[1]);
+      ctx.lineTo(end[0], end[1]);
+    }
+    for (var y = 0; y <= gridLines; y++) {
+      if (y % grid.colors[c].interval != 0) continue;
+      var _correctInterval = true;
+      for (var _n2 = 0; _n2 < c; _n2++) {
+        if (y % grid.colors[_n2].interval == 0) {
+          _correctInterval = false;
+          break;
+        }
+      }
+      if (_correctInterval != true) continue;
+      //same as above, but perpendicular
+      var _start = [gridStart[0], gridStart[0] + y * gridSpacing];
+      var _end = [gridStart[0] + gridLines * gridSpacing, _start[1]];
+      _start = worldPointToCameraSpace(_start[0], _start[1], camera);
+      _end = worldPointToCameraSpace(_end[0], _end[1], camera);
+      ctx.moveTo(_start[0], _start[1]);
+      ctx.lineTo(_end[0], _end[1]);
+    }
+    //draw all lines, stroke last
+    ctx.globalAlpha = .3;
+    ctx.strokeWidth = 5;
+    ctx.strokeStyle = grid.colors[c].color;
+    ctx.stroke();
+    ctx.restore();
+  }
+};
+
+var linkCameraWithOffset = function linkCameraWithOffset(mainCamera, dependentCamera, offset) {
+  dependentCamera.x = mainCamera.x;
+  dependentCamera.y = mainCamera.y;
+  dependentCamera.rotation = mainCamera.rotation;
+  var cameraDistance = 1 / mainCamera.zoom;
+  dependentCamera.zoom = 1 / (cameraDistance + offset);
+};
+
 var drawLoop = function drawLoop() {
-  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = 'black';
+  context.fillRect(0, 0, canvas.width, canvas.height);
   var currentTime = Date.now();
+
+  linkCameraWithOffset(camera, starCamera, 100);
+  linkCameraWithOffset(camera, gridCamera, 2);
+
+  drawStars(stars, starCamera);
+  drawGrid(grid, gridCamera);
+
   if (myCommandLog) {
     var snapshot = integrateCommandLogIntoSnapshot(currentTime, myCommandLog);
     camera.x = snapshot.worldState.x;
     camera.y = snapshot.worldState.y;
     camera.rotation = snapshot.worldState.orientation;
 
+    var integratedSnapshots = [];
     for (var id in commandLogsByAvatar) {
-      drawAvatar(integrateCommandLogIntoSnapshot(currentTime, commandLogsByAvatar[id]), camera);
+      integratedSnapshots.push(integrateCommandLogIntoSnapshot(currentTime, commandLogsByAvatar[id]));
+    }
+    drawProjectionLines(snapshot, camera, gridCamera);
+    for (var index in integratedSnapshots) {
+      drawProjectionLines(integratedSnapshots[index], camera, gridCamera);
+    }
+    for (var _index in integratedSnapshots) {
+      drawAvatar(integratedSnapshots[_index], camera);
     }
     drawAvatar(snapshot, camera);
     if (shouldSendSnapshot) {
@@ -359,6 +541,38 @@ var init = function init() {
     height: canvas.height,
     ctx: context
   };
+
+  starCamera = {
+    //position/rotation
+    x: 0,
+    y: 0,
+    rotation: 0,
+    //scale value, basically
+    zoom: 1,
+    minZoom: .0001,
+    maxZoom: 5,
+    //screen dimensions
+    width: canvas.width,
+    height: canvas.height,
+    ctx: context
+  };
+
+  gridCamera = {
+    //position/rotation
+    x: 0,
+    y: 0,
+    rotation: 0,
+    //scale value, basically
+    zoom: 1,
+    minZoom: .0001,
+    maxZoom: 5,
+    //screen dimensions
+    width: canvas.width,
+    height: canvas.height,
+    ctx: context
+  };
+
+  generateStarField(stars);
 
   socket.on('commandInfo', function (data) {
     //console.log(`Command ${data.command} ${data.state} from ${data.id}`);
