@@ -30,7 +30,7 @@ const io = socketio(app);
 
 io.on('connection', (socket) => {
   let roomNumber = 0;
-  while(roomCounts[roomNumber] >= MAX_ROOM_SIZE) roomNumber++;
+  while (roomCounts[roomNumber] >= MAX_ROOM_SIZE) roomNumber++;
   const roomString = `room${roomNumber}`;
   roomCounts[roomNumber]++;
 

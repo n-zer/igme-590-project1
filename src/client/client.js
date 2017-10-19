@@ -41,6 +41,10 @@ const searchFromBack = (arr, evalFunc) => {
   return undefined;
 };
 
+const lerp = (from, to, percent) => {
+  return (from * (1.0 - percent)) + (to * percent);
+};
+
 class CommandInfo {
   constructor(command, state) {
     this.command = command;
@@ -50,8 +54,8 @@ class CommandInfo {
   }
 }
 
-const MOVE_SPEED = 100;
-const ROTATION_SPEED_DG = 90;
+const MOVE_SPEED = 1000;
+const ROTATION_SPEED_DG = 180;
 
 const toRadians = (angle) => {
   return angle * (Math.PI / 180);
@@ -117,7 +121,12 @@ class WorldState {
 
   applyDeltaState(deltaState) {
     let rotatedDisplacement = rotate(0, 0, deltaState.x, deltaState.y, -this.orientation);
-    return new WorldState(this.x + rotatedDisplacement[0], this.y + rotatedDisplacement[1], this.orientation + deltaState.rotation);
+    let newOrientation = this.orientation + deltaState.rotation;
+    if(newOrientation > 180)
+      newOrientation -= 360;
+    else if(newOrientation < -180)
+      newOrientation += 360;
+    return new WorldState(this.x + rotatedDisplacement[0], this.y + rotatedDisplacement[1], newOrientation);
   }
 }
 
@@ -426,9 +435,11 @@ const drawGrid = (grid, camera) => {
       }
       if(correctInterval != true)
         continue;
+
       //define start and end points for current line in world space
       let start = [gridStart[0] + x * gridSpacing, gridStart[1]];
       let end = [start[0], gridStart[1] + gridLines * gridSpacing];
+
       //convert to camera space
       start = worldPointToCameraSpace(start[0], start[1], camera);
       end = worldPointToCameraSpace(end[0], end[1], camera);      
@@ -449,6 +460,7 @@ const drawGrid = (grid, camera) => {
       }
       if(correctInterval!=true)
         continue;
+
       //same as above, but perpendicular
       let start = [gridStart[0], gridStart[0] + y * gridSpacing];
       let end = [gridStart[0] + gridLines * gridSpacing, start[1]];
@@ -457,6 +469,7 @@ const drawGrid = (grid, camera) => {
       ctx.moveTo(start[0], start[1]);
       ctx.lineTo(end[0], end[1]);
     }
+
     //draw all lines, stroke last
     ctx.globalAlpha = .3;
     ctx.strokeWidth = 5;
@@ -479,17 +492,26 @@ const drawLoop = () => {
   context.fillRect(0, 0, canvas.width, canvas.height);
   const currentTime = Date.now();
 
-  linkCameraWithOffset(camera, starCamera, 100);
-  linkCameraWithOffset(camera, gridCamera, 2);
-
   drawStars(stars, starCamera);
   drawGrid(grid, gridCamera);
 
   if(myCommandLog){
     const snapshot = integrateCommandLogIntoSnapshot(currentTime, myCommandLog);
-    camera.x = snapshot.worldState.x;
-    camera.y = snapshot.worldState.y;
-    camera.rotation = snapshot.worldState.orientation;
+    camera.x = lerp(camera.x, snapshot.worldState.x, MOVE_SPEED / 10000);
+    camera.y = lerp(camera.y, snapshot.worldState.y, MOVE_SPEED / 10000);
+    var rotDiff = snapshot.worldState.orientation - camera.rotation;
+    if(rotDiff>180)
+      rotDiff-=360;
+    else if(rotDiff<-180)
+      rotDiff+=360;
+    camera.rotation += lerp(0, rotDiff, ROTATION_SPEED_DG / 5000);
+    if(camera.rotation>180)
+      camera.rotation-=360;
+    else if(camera.rotation<-180)
+      camera.rotation+=360;
+
+    linkCameraWithOffset(camera, starCamera, 100);
+    linkCameraWithOffset(camera, gridCamera, 1);
 
     const integratedSnapshots = [];
     for(const id in commandLogsByAvatar){
